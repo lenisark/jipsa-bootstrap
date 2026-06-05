@@ -1,0 +1,44 @@
+# 시크릿 절대 커밋 금지
+*.env
+!.env.example
+
+# 채널 매핑 실파일 (채널ID 포함) — .example만 커밋
+channels.json
+!channels.json.example
+
+# 런타임 상태 파일 (데몬이 생성)
+reminders.json
+polls.json
+wiki_saved.json
+fired_log.json
+holidays_extra.json
+discussion_state.json
+
+# 위키 수집물 (📌 자동 생성) — 골격 README/FAQ만 커밋
+**/docs/위키-수집.md
+
+# 로그
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# 사용자 환경에서 생성된 파일
+secrets/
+sessions/
+.processed/
+.omc/
+*.bak
+*.bak-*
+
+# 실코드 이식용 임시 스테이징
+_source/
+
+# 다른 세션 작업물 (키트 본체와 무관)
+TASK_PIPELINE.md
+REVIEW*.md

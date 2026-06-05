@@ -1,0 +1,6 @@
+[Unit]
+Description=Agent Bootstrap — Folder watch processor
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.claude/scripts/folder-watch/run.sh

@@ -1,0 +1,9 @@
+[Unit]
+Description=Agent Bootstrap — Watch {WATCH_FOLDER}
+
+[Path]
+PathChanged={WATCH_FOLDER}
+TriggerLimitIntervalSec=5
+
+[Install]
+WantedBy=default.target

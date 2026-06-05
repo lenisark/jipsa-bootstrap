@@ -1,0 +1,9 @@
+#!/bin/bash
+# macOS / Linux 데몬 진입점. launchd / systemd 가 이 스크립트를 실행한다.
+# .env 의 토큰을 환경변수로 로드한 뒤 멀티채널 daemon.py 실행.
+set -a
+source "$HOME/.claude/secrets/slack-jipsa.env"
+set +a
+# {PYTHON_PATH} = 셋업 시 실제 python3 경로로 치환 (기본 /usr/bin/python3).
+#   venv 사용 시: $HOME/.claude/scripts/slack-jipsa/venv/bin/python
+exec "{PYTHON_PATH}" "$HOME/.claude/scripts/slack-jipsa/daemon.py"

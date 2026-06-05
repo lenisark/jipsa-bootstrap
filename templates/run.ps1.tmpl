@@ -1,0 +1,27 @@
+$env:PATH = "$env:USERPROFILE\.local\bin;$env:APPDATA\npm;$env:PATH"
+
+# ── 중복 인스턴스 방지 ──────────────────────────────────────────────
+# 시작 전에 기존 daemon.py 프로세스를 모두 종료한다.
+# (Stop-ScheduledTask 가 python 자식 프로세스를 못 죽여 orphan 이 남던 문제 해결)
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -like '*slack-jipsa\daemon.py*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 500
+
+# ── 환경변수 로드 (반드시 UTF-8) ────────────────────────────────────
+# UTF-8 지정 없이 읽으면 한글(USER_NAME/SLACK_BOT_NAME)이 CP949 로 깨진다.
+$envFile = "$env:USERPROFILE\.claude\secrets\slack-jipsa.env"
+Get-Content $envFile -Encoding UTF8 | ForEach-Object {
+    if ($_ -match '^\s*([^#=][^=]*)=(.*)$') {
+        $name = $Matches[1].Trim()
+        $value = $Matches[2].Trim()
+        [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+}
+
+# 데몬 실행. 크래시(비정상 종료) 시 작업 스케줄러가 자동 재시작한다
+# (RestartCount/RestartInterval 설정). 그래서 python 종료코드를 그대로 반환.
+# {PYTHON_PATH} = 셋업 시 실제 python.exe 절대경로로 치환 (예: C:\Python314\python.exe).
+#   venv 사용 시: $env:USERPROFILE\.claude\scripts\slack-jipsa\venv\Scripts\python.exe
+& "{PYTHON_PATH}" "$env:USERPROFILE\.claude\scripts\slack-jipsa\daemon.py"
+exit $LASTEXITCODE

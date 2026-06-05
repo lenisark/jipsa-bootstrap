@@ -1,0 +1,18 @@
+{
+  "C_PERSONAL_CHANNEL_ID": {
+    "label": "개인 비서",
+    "model": "opus",
+    "access": "owner",
+    "cwd": "~/.claude/scripts/slack-jipsa",
+    "add_dirs": ["~"]
+  },
+  "C_TEAM_CHANNEL_ID": {
+    "label": "부서 공용 비서",
+    "model": "sonnet",
+    "access": "all",
+    "cwd": "~/.claude/scripts/slack-team",
+    "add_dirs": [],
+    "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"],
+    "require_mention": true
+  }
+}

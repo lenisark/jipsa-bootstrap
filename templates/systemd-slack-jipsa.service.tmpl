@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Bootstrap — Slack Jipsa daemon
+After=default.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.claude/secrets/slack-jipsa.env
+ExecStart=/usr/bin/python3 %h/.claude/scripts/slack-jipsa/daemon.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.claude/scripts/slack-jipsa/logs/systemd.out
+StandardError=append:%h/.claude/scripts/slack-jipsa/logs/systemd.err
+
+[Install]
+WantedBy=default.target
