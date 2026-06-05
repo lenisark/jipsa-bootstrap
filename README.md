@@ -31,7 +31,7 @@
 ### 1. 키트 다운로드
 
 ```bash
-git clone https://github.com/<your-account>/jipsa-bootstrap.git
+git clone https://github.com/lenisark/jipsa-bootstrap.git
 cd jipsa-bootstrap
 ```
 
