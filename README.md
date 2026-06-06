@@ -31,7 +31,7 @@
 ### 1. 키트 다운로드
 
 ```bash
-git clone https://github.com/lenisark/jipsa-bootstrap.git
+git clone https://github.jipsa-bootstrap.git
 cd jipsa-bootstrap
 ```
 
@@ -60,7 +60,7 @@ Claude가 자동으로 OS 확인 → 깔 모듈 선택 → 슬랙 앱/토큰 안
 | **Python 3** + `slack_sdk` `holidays` | 무료 | 데몬 |
 | **OS** | — | Windows / macOS / Linux |
 
-> AI가 OS를 묻고 자동 분기합니다 (Windows=Task Scheduler+PowerShell, macOS=launchd, Linux=systemd).
+> AI가 OS를 묻고 자동 분기합니다 (Windows=Task IÈ^vé^¯ãèÁêÒée, macOS=launchd, Linux=systemd).
 
 ---
 
