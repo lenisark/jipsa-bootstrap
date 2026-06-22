@@ -45,6 +45,36 @@ class RemindersActionTest(unittest.TestCase):
         # 작업동사 없이 보고동사만 → 액션 아님
         self.assertFalse(self.r._is_action_text('매일 9시에 회의 있다고 알려줘'))
 
+    def _run_handle(self, text):
+        """handle 전체 경로를 가짜 web/임시저장소로 실행 → 게시된 텍스트 목록 반환."""
+        import tempfile
+        from pathlib import Path as _P
+        self.r.REMINDERS_FILE = _P(tempfile.mkdtemp()) / 'r.json'
+        self.r.set_executor(lambda ch, p: 'ok')
+        posts = []
+
+        class FakeWeb:
+            def chat_postMessage(self, **k): posts.append(k.get('text', '')); return {'ts': '1'}
+            def reactions_add(self, **k): pass
+            def reactions_remove(self, **k): pass
+            def users_info(self, **k): return {'user': {'profile': {'display_name': 't'}}}
+        self.r.handle(FakeWeb(), 'C1', 'U1', text, '1')
+        return posts
+
+    def test_daily_reminder_registers(self):
+        # 기존 버그 회귀: daily 가 _handle_add else 로 빠져 항상 err 나던 문제
+        posts = self._run_handle('매일 18시에 일일보고 알려줘')
+        joined = '\n'.join(posts)
+        self.assertIn('등록 완료', joined)
+        self.assertNotIn('이해 못했어요', joined)
+
+    def test_daily_action_reminder_registers(self):
+        posts = self._run_handle('매일 9시에 어제 대화 요약해서 올려줘')
+        joined = '\n'.join(posts)
+        self.assertIn('등록 완료', joined)
+        self.assertIn('능동 작업', joined)        # 🤖 능동 작업 표시
+        self.assertNotIn('이해 못했어요', joined)
+
 
 if __name__ == '__main__':
     unittest.main()

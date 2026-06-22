@@ -534,6 +534,8 @@ def _handle_add(web, channel, user, intent) -> None:
     elif freq == 'weekly':
         if intent.get('weekday') is None:
             err = True
+    elif freq == 'daily':
+        pass  # 추가 검증 불필요 — hour/msg 는 위에서 확인됨 (기존 버그: daily 누락 → else로 빠져 항상 err)
     elif freq == 'once':
         try:
             od = date.fromisoformat(intent.get('once_date'))
