@@ -194,6 +194,25 @@ def _expand(p: str) -> str:
     return os.path.expanduser(p) if p else p
 
 
+# 런타임 오버라이드 (슬랙 `저장폴더` 명령으로 바뀐 add_dirs 등). channels.json 과 분리 보관.
+OVERRIDES_FILE = Path.home() / '.claude/scripts/slack-jipsa/channel_overrides.json'
+
+
+def _load_overrides() -> dict:
+    try:
+        if OVERRIDES_FILE.exists():
+            return json.loads(OVERRIDES_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_channel_override(channel: str, patch: dict) -> None:
+    d = _load_overrides()
+    d.setdefault(channel, {}).update(patch)
+    OVERRIDES_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def load_channels() -> dict[str, dict]:
     """channels.json 로드. 없거나 비면 legacy 단일 채널(opus/owner/홈)로 fallback."""
     default_cwd = str(Path.home() / '.claude/scripts/slack-jipsa')
@@ -213,7 +232,13 @@ def load_channels() -> dict[str, dict]:
                     'mission': cfg.get('mission', ''),                       # 2.0: 페르소나
                     'tasks_enabled': bool(cfg.get('tasks_enabled', False)),  # 2.0: 작업 객체
                     'gate': cfg.get('gate') or {},                          # 2.0: 승인 게이트(비면 off)
+                    # 2.0: `저장폴더` 명령으로 설정 가능한 출력 폴더의 허용 상위 루트
+                    'output_roots': [_expand(d) for d in (cfg.get('output_roots') or [])],
                 }
+            # 런타임 오버라이드 병합 (슬랙에서 바꾼 add_dirs 등 — 재시작에도 유지)
+            for ch, patch in _load_overrides().items():
+                if ch in out and isinstance(patch, dict) and patch.get('add_dirs'):
+                    out[ch]['add_dirs'] = [_expand(d) for d in patch['add_dirs']]
             if out:
                 return out
             log('channels.json 비어있음 — legacy 단일 채널로 fallback')
@@ -222,7 +247,7 @@ def load_channels() -> dict[str, dict]:
     return {CHANNEL: {'label': '개인 비서', 'model': 'opus', 'access': 'owner',
                       'cwd': default_cwd, 'add_dirs': [str(Path.home())],
                       'disallowed_tools': [], 'mission': '',
-                      'tasks_enabled': False, 'gate': {}}}
+                      'tasks_enabled': False, 'gate': {}, 'output_roots': []}}
 
 
 CHANNELS = load_channels()
@@ -571,6 +596,71 @@ def handle_task_command(channel: str, text: str) -> bool:
     return False
 
 
+# ── 저장 폴더 변경 (jipsa 2.0, 소유자 전용 + 허용루트 제한) ─────────
+OUTPUT_DIR_TRIGGER = re.compile(r'^저장\s*폴더')
+
+
+def _under_roots(path: str, roots: list[str]) -> bool:
+    """path 가 허용 루트(roots) 중 하나의 하위인가? (심볼릭/대소문자/드라이브 안전)"""
+    rp = os.path.realpath(os.path.expanduser(path))
+    for r in roots:
+        rr = os.path.realpath(os.path.expanduser(r))
+        try:
+            if os.path.commonpath([rp, rr]) == rr:
+                return True
+        except ValueError:                      # 다른 드라이브(Windows) 등
+            continue
+    return False
+
+
+def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
+    """`저장폴더` / `저장폴더 <경로>` 처리. 처리했으면 True."""
+    t = text.strip()
+    if not OUTPUT_DIR_TRIGGER.match(t):
+        return False
+    cfg = CHANNELS.get(channel, {})
+    arg = OUTPUT_DIR_TRIGGER.sub('', t, count=1).strip().strip('"\'' )
+    if not arg:                                  # 현재 저장 폴더 표시
+        cur = cfg.get('add_dirs') or []
+        roots = cfg.get('output_roots') or []
+        msg = f"📁 현재 저장 폴더: {cur[0] if cur else '(샌드박스 — 작업폴더 내부만)'}"
+        if roots:
+            msg += f"\n변경(소유자만): `저장폴더 <경로>` · 허용 루트: {', '.join(roots)}"
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=msg)
+        return True
+    # 변경은 소유자만
+    if user != MIRI:
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='저장 폴더 변경은 소유자만 가능해요.')
+        except Exception:
+            pass
+        return True
+    roots = cfg.get('output_roots') or []
+    if not roots:
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            '이 채널은 저장 폴더 변경이 꺼져 있어요. '
+            '`channels.json` 의 `output_roots` 에 허용 폴더를 먼저 지정하세요.'))
+        return True
+    if not _under_roots(arg, roots):
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f"허용된 폴더 밖이에요. 허용 루트 하위로만 지정할 수 있어요:\n• " +
+            '\n• '.join(roots)))
+        return True
+    path = os.path.realpath(os.path.expanduser(arg))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        web.chat_postMessage(channel=channel, text=f'폴더를 만들지 못했어요: {e}')
+        return True
+    CHANNELS[channel]['add_dirs'] = [path]        # 핫리로드 (다음 호출부터 적용)
+    _save_channel_override(channel, {'add_dirs': [path]})  # 재시작에도 유지
+    web.chat_postMessage(channel=channel, mrkdwn=True,
+                         text=f"✅ 저장 폴더를 `{path}` 로 바꿨어요. (즉시 적용)")
+    log(f'output dir set ch={channel} -> {path} by {user}')
+    return True
+
+
 # ── 도움말 ─────────────────────────────────────────────────────────
 def handle_help(channel: str) -> None:
     p = '@집사 ' if CHANNELS.get(channel, {}).get('require_mention') else ''
@@ -783,6 +873,13 @@ def handle_message(event: dict) -> None:
         new_sid = reset_session(channel)
         web.chat_postMessage(channel=channel, text=f'🔄 새 세션 시작 (`{new_sid[:8]}`)')
         return
+
+    # 저장 폴더 변경 명령 (소유자 전용). 처리되면 claude 호출 skip.
+    try:
+        if handle_output_dir_command(channel, user, text):
+            return
+    except Exception as e:
+        log(f'  output dir cmd err: {e}')
 
     # 작업 객체 명령 (tasks_enabled 채널만). 처리되면 claude 호출 skip.
     try:
