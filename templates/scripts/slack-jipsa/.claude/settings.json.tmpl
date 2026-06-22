@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__ \"$CLAUDE_PROJECT_DIR/pretooluse_gate.py\"",
+            "timeout": 1000
+          }
+        ]
+      }
+    ]
+  }
+}

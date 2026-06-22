@@ -48,6 +48,13 @@ try:
 except Exception:
     rmd = None
 
+# 작업 객체(Task Layer, jipsa 2.0). 로드 실패해도 채팅은 동작하도록 방어.
+try:
+    import tasks as tsk
+    tsk.init_db()
+except Exception:
+    tsk = None
+
 SECRETS = Path.home() / '.claude/secrets/slack-jipsa.env'
 SESSIONS_DIR = Path.home() / '.claude/scripts/slack-jipsa/sessions'
 LOGS_DIR = Path.home() / '.claude/scripts/slack-jipsa/logs'
@@ -203,6 +210,9 @@ def load_channels() -> dict[str, dict]:
                     'add_dirs': [_expand(d) for d in (cfg.get('add_dirs') or [])],
                     'disallowed_tools': list(cfg.get('disallowed_tools') or []),
                     'require_mention': bool(cfg.get('require_mention', False)),
+                    'mission': cfg.get('mission', ''),                       # 2.0: 페르소나
+                    'tasks_enabled': bool(cfg.get('tasks_enabled', False)),  # 2.0: 작업 객체
+                    'gate': cfg.get('gate') or {},                          # 2.0: 승인 게이트(비면 off)
                 }
             if out:
                 return out
@@ -211,7 +221,8 @@ def load_channels() -> dict[str, dict]:
             log(f'channels.json 파싱 실패 ({e}) — legacy 단일 채널로 fallback')
     return {CHANNEL: {'label': '개인 비서', 'model': 'opus', 'access': 'owner',
                       'cwd': default_cwd, 'add_dirs': [str(Path.home())],
-                      'disallowed_tools': []}}
+                      'disallowed_tools': [], 'mission': '',
+                      'tasks_enabled': False, 'gate': {}}}
 
 
 CHANNELS = load_channels()
@@ -252,9 +263,19 @@ SYSTEM_PROMPT = f"""당신은 {USER_NAME}님의 슬랙 집사 '{BOT_NAME}'입니
 def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
                 model: str = 'opus', cwd: str | None = None,
                 add_dirs: list[str] | None = None,
-                disallowed_tools: list[str] | None = None) -> subprocess.CompletedProcess:
+                disallowed_tools: list[str] | None = None,
+                gate: dict | None = None, gate_channel: str = '',
+                gate_thread: str = '') -> subprocess.CompletedProcess:
     env = os.environ.copy()
-    env['CLAUDE_SKIP_HOOKS'] = '1'
+    if not gate:
+        env['CLAUDE_SKIP_HOOKS'] = '1'          # 기존 동작: 훅 전부 끔
+    else:
+        # 게이트 채널: PreToolUse 훅 켜고(.claude/settings.json) 게이트 컨텍스트 주입
+        env.pop('CLAUDE_SKIP_HOOKS', None)
+        env['JIPSA_GATE_CHANNEL'] = gate_channel or ''
+        env['JIPSA_GATE_THREAD'] = gate_thread or ''
+        env['JIPSA_GATE_APPROVERS'] = ','.join(gate.get('approvers', []))
+        env['JIPSA_GATE_TIMEOUT_MIN'] = str(gate.get('timeout_min', 15))
     cmd = [
         'claude', '--print',
         '--permission-mode', 'bypassPermissions',
@@ -276,7 +297,7 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
                           encoding='utf-8', env=env, cwd=run_cwd, timeout=timeout)
 
 
-def call_claude(prompt: str, channel: str, timeout: int = 900) -> str:
+def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = '') -> str:
     """클로드 코드 호출. resume 실패 시 자동으로 새 session 재시도."""
     sid, is_new = get_or_create_session(channel)
     cfg = CHANNELS.get(channel, {})
@@ -284,13 +305,19 @@ def call_claude(prompt: str, channel: str, timeout: int = 900) -> str:
     cwd = cfg.get('cwd')
     add_dirs = cfg.get('add_dirs')
     disallowed = cfg.get('disallowed_tools')
+    # 승인 게이트: 개인 차단 게이트만(Phase B). 부서 escalate(mode=escalate)는 Phase C.
+    gate_cfg = cfg.get('gate') or {}
+    use_gate = bool(gate_cfg.get('enabled')) and gate_cfg.get('mode', 'block') != 'escalate'
+    gate_arg = gate_cfg if use_gate else None
     try:
-        r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed)
+        r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed,
+                        gate=gate_arg, gate_channel=channel, gate_thread=thread_ts)
         # resume 실패 (jsonl 없음) → 새 session으로 재시도
         if r.returncode != 0 and not is_new and 'No conversation found' in (r.stderr or ''):
             log(f'  resume fail, fallback to new session')
             new_sid = reset_session(channel)
-            r = _run_claude(prompt, new_sid, True, timeout, model, cwd, add_dirs, disallowed)
+            r = _run_claude(prompt, new_sid, True, timeout, model, cwd, add_dirs, disallowed,
+                            gate=gate_arg, gate_channel=channel, gate_thread=thread_ts)
     except subprocess.TimeoutExpired:
         return f'⏱️ 타임아웃 ({timeout}초). 작업이 너무 길어요.'
     if r.returncode != 0:
@@ -429,6 +456,46 @@ def _tally_poll(channel: str) -> None:
     web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
 
 
+# ── 작업 객체 명령 (jipsa 2.0) ─────────────────────────────────────
+def _tasks_enabled(channel: str) -> bool:
+    return bool(tsk and CHANNELS.get(channel, {}).get('tasks_enabled'))
+
+
+def handle_task_command(channel: str, text: str) -> bool:
+    """작업 관련 슬랙 명령 처리. 처리했으면 True(=이후 claude 호출 skip)."""
+    if not _tasks_enabled(channel):
+        return False
+    t = text.strip()
+    if t in ('작업목록', '작업 목록'):
+        rows = tsk.list_tasks(channel, states=('대기', '진행', '막힘'))
+        if not rows:
+            web.chat_postMessage(channel=channel, text='열린 작업이 없어요.')
+            return True
+        lines = ['*📋 열린 작업*']
+        icon = {'대기': '🕒', '진행': '🔧', '막힘': '⛔'}
+        for r in rows:
+            lines.append(f"{icon.get(r['state'], '•')} `{r['id'][:8]}` {r['title']}  _({r['state']})_")
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+    m = re.match(r'^작업\s+([0-9a-f]{6,})\s+(진행|막힘|완료|취소)$', t)
+    if m:
+        prefix, state = m.group(1), m.group(2)
+        rows = [r for r in tsk.list_tasks(channel) if r['id'].startswith(prefix)]
+        if not rows:
+            web.chat_postMessage(channel=channel, text=f'`{prefix}` 작업을 못 찾았어요.')
+            return True
+        ok = tsk.set_state(rows[0]['id'], state)
+        if ok:
+            web.chat_postMessage(channel=channel,
+                                 text=f"`{rows[0]['id'][:8]}` → *{state}*", mrkdwn=True)
+        else:
+            web.chat_postMessage(channel=channel,
+                                 text=f"`{rows[0]['id'][:8]}` 는 현재 *{rows[0]['state']}* 라 *{state}* 로 못 바꿔요.",
+                                 mrkdwn=True)
+        return True
+    return False
+
+
 # ── 도움말 ─────────────────────────────────────────────────────────
 def handle_help(channel: str) -> None:
     p = '@집사 ' if CHANNELS.get(channel, {}).get('require_mention') else ''
@@ -447,6 +514,12 @@ def handle_help(channel: str) -> None:
         f"*📝 요약*  `{p}오늘 대화 요약해줘`\n"
         f"*📚 FAQ*  `{p}연차 어떻게 신청해?`"
     )
+    if _tasks_enabled(channel):
+        text += (
+            "\n\n*📋 작업*\n"
+            f"• `{p}작업목록`  _(열린 작업 보기)_\n"
+            f"• `{p}작업 ab12cd34 진행|막힘|완료|취소`  _(상태 변경)_"
+        )
     web.chat_postMessage(channel=channel, text=text, mrkdwn=True)
 
 
@@ -636,6 +709,13 @@ def handle_message(event: dict) -> None:
         web.chat_postMessage(channel=channel, text=f'🔄 새 세션 시작 (`{new_sid[:8]}`)')
         return
 
+    # 작업 객체 명령 (tasks_enabled 채널만). 처리되면 claude 호출 skip.
+    try:
+        if handle_task_command(channel, text):
+            return
+    except Exception as e:
+        log(f'  task cmd err: {e}')
+
     # 도움말
     if HELP_TRIGGER.search(text):
         log('help req')
@@ -715,7 +795,7 @@ def handle_message(event: dict) -> None:
         prompt_with_ctx = '\n'.join(ctx_lines)
 
     # 클로드 호출 (resume 실패 시 자동 fallback)
-    reply = call_claude(prompt_with_ctx, channel)
+    reply = call_claude(prompt_with_ctx, channel, thread_ts=thread_ts)
     log(f'  reply: {reply[:80]}')
 
     # 자기가 응답할 차례가 아니라 판단 → 시스템이 SKIP 출력 → post 안 함
@@ -776,9 +856,82 @@ def handle_message(event: dict) -> None:
         log(f'  notion log thread fail: {e}')
 
 
+# ── 승인 게이트 버튼 (jipsa 2.0) ───────────────────────────────────
+def _audit_verdict(token: str, result: str, user: str, name: str) -> None:
+    """승인 verdict 감사 로그 — 노션 세션 DB에 적재(있으면). 없으면 skip."""
+    if not NOTION_SESSION_DB or tsk is None:
+        return
+    try:
+        import approval as apv
+        row = apv.get_approval(token) or {}
+        threading.Thread(target=notion_log_turn, args=(
+            row.get('channel_id', ''), f'gate:{token}',
+            f'승인요청: {row.get("action_desc", "")}',
+            f'{name}({user}) → {result}',
+            f'gate:{token}', 'gate'), daemon=True).start()
+    except Exception as e:
+        log(f'  audit fail: {e}')
+
+
+def handle_block_action(payload: dict) -> None:
+    """승인 게이트 버튼 클릭 처리. token=button value, 누른 사람 검증 후 verdict."""
+    if tsk is None:
+        return
+    try:
+        import approval as apv
+    except Exception as e:
+        log(f'  approval import fail: {e}')
+        return
+    user = (payload.get('user') or {}).get('id', '')
+    actions = payload.get('actions') or []
+    if not actions:
+        return
+    act = actions[0]
+    action_id = act.get('action_id', '')
+    token = act.get('value', '')
+    channel = (payload.get('channel') or {}).get('id', '')
+    msg_ts = (payload.get('message') or {}).get('ts', '')
+    if action_id not in ('gate_approve', 'gate_reject') or not token:
+        return
+    approve = (action_id == 'gate_approve')
+    result = apv.decide(token, user, approve=approve)
+    name = _resolve_name(user)
+    if result in ('승인', '거부'):
+        mark = '✅' if result == '승인' else '⛔'
+        done = f"{mark} {name}님이 *{result}* 했습니다."
+        try:  # 카드 메시지를 결과로 교체(버튼 제거)
+            web.chat_update(channel=channel, ts=msg_ts, text=done,
+                            blocks=[{'type': 'section',
+                                     'text': {'type': 'mrkdwn', 'text': done}}])
+        except Exception as e:
+            log(f'  card update fail: {e}')
+        log(f'gate {result} token={token[:8]} by={name}')
+        try:
+            _audit_verdict(token, result, user, name)
+        except Exception:
+            pass
+    elif result == '권한없음':
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='이 승인 요청을 처리할 권한이 없어요.')
+        except Exception:
+            pass
+    else:  # 이미처리 / 만료 / 없음
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text=f'이미 처리됐거나 만료된 요청이에요. ({result})')
+        except Exception:
+            pass
+
+
 def on_event(client: SocketModeClient, req: SocketModeRequest) -> None:
     # Slack에 즉시 ACK (3초 이내 필수)
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+    if req.type == 'interactive':
+        payload = req.payload or {}
+        if payload.get('type') == 'block_actions':
+            threading.Thread(target=handle_block_action, args=(payload,), daemon=True).start()
+        return
     if req.type != 'events_api': return
     event = req.payload.get('event', {})
     if event.get('type') == 'message' and not event.get('subtype'):
@@ -910,6 +1063,32 @@ def _handle_pin(channel: str, ts: str, user: str) -> None:
     log(f'pin saved ts={ts} -> {wiki}')
 
 
+def _gate_sweeper() -> None:
+    """주기적으로 만료된 승인 요청을 정리하고 막힌 task 요청자에게 알림."""
+    if tsk is None:
+        return
+    try:
+        import approval as apv
+    except Exception:
+        return
+    last = int(time.time())
+    while True:
+        time.sleep(30)
+        try:
+            n = apv.expire_stale()
+            if n:
+                for row in apv.list_expired_since(last):
+                    ch = row.get('channel_id'); th = row.get('thread_ts') or None
+                    try:
+                        web.chat_postMessage(channel=ch, thread_ts=th,
+                            text=f"⏱️ 승인 요청이 만료돼 *거부* 처리됐어요: {row.get('action_desc', '')[:120]}")
+                    except Exception:
+                        pass
+            last = int(time.time())
+        except Exception as e:
+            log(f'  sweeper err: {e}')
+
+
 def main() -> None:
     log(f'=== {BOT_NAME} daemon 시작 (channel={CHANNEL[:6]}.., bot={BOT}) ===')
     sock.socket_mode_request_listeners.append(on_event)
@@ -921,6 +1100,8 @@ def main() -> None:
         threading.Thread(target=rmd.reminder_loop, args=(web,), daemon=True).start()
     else:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
+    # 승인 게이트 만료 sweeper (jipsa 2.0)
+    threading.Thread(target=_gate_sweeper, daemon=True).start()
     # 무한 대기
     while True:
         time.sleep(60)
