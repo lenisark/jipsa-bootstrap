@@ -234,11 +234,16 @@ def load_channels() -> dict[str, dict]:
                     'gate': cfg.get('gate') or {},                          # 2.0: 승인 게이트(비면 off)
                     # 2.0: `저장폴더` 명령으로 설정 가능한 출력 폴더의 허용 상위 루트
                     'output_roots': [_expand(d) for d in (cfg.get('output_roots') or [])],
+                    # 2.0: 기본 저장 위치(시스템 프롬프트로 주입). `저장폴더` 명령으로 갱신.
+                    'output_dir': _expand(cfg.get('output_dir') or ''),
                 }
-            # 런타임 오버라이드 병합 (슬랙에서 바꾼 add_dirs 등 — 재시작에도 유지)
+            # 런타임 오버라이드 병합 (슬랙에서 바꾼 add_dirs/output_dir — 재시작에도 유지)
             for ch, patch in _load_overrides().items():
-                if ch in out and isinstance(patch, dict) and patch.get('add_dirs'):
-                    out[ch]['add_dirs'] = [_expand(d) for d in patch['add_dirs']]
+                if ch in out and isinstance(patch, dict):
+                    if patch.get('add_dirs'):
+                        out[ch]['add_dirs'] = [_expand(d) for d in patch['add_dirs']]
+                    if patch.get('output_dir'):
+                        out[ch]['output_dir'] = _expand(patch['output_dir'])
             if out:
                 return out
             log('channels.json 비어있음 — legacy 단일 채널로 fallback')
@@ -247,7 +252,8 @@ def load_channels() -> dict[str, dict]:
     return {CHANNEL: {'label': '개인 비서', 'model': 'opus', 'access': 'owner',
                       'cwd': default_cwd, 'add_dirs': [str(Path.home())],
                       'disallowed_tools': [], 'mission': '',
-                      'tasks_enabled': False, 'gate': {}, 'output_roots': []}}
+                      'tasks_enabled': False, 'gate': {}, 'output_roots': [],
+                      'output_dir': ''}}
 
 
 CHANNELS = load_channels()
@@ -290,7 +296,7 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
                 add_dirs: list[str] | None = None,
                 disallowed_tools: list[str] | None = None,
                 gate: dict | None = None, gate_channel: str = '',
-                gate_thread: str = '') -> subprocess.CompletedProcess:
+                gate_thread: str = '', output_dir: str = '') -> subprocess.CompletedProcess:
     env = os.environ.copy()
     if not gate:
         env['CLAUDE_SKIP_HOOKS'] = '1'          # 기존 동작: 훅 전부 끔
@@ -302,13 +308,17 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
         env['JIPSA_GATE_APPROVERS'] = ','.join(gate.get('approvers', []))
         env['JIPSA_GATE_TIMEOUT_MIN'] = str(gate.get('timeout_min', 15))
         env['JIPSA_GATE_MODE'] = gate.get('mode', 'block')   # block(개인) | escalate(부서)
+    sysprompt = SYSTEM_PROMPT
+    if output_dir:
+        sysprompt += (f"\n\n[저장 위치] 이 채널에서 새로 만드는 파일은 특별한 경로 "
+                      f"지정이 없으면 `{output_dir}` 폴더 안에 저장하세요.")
     cmd = [
         'claude', '--print',
         '--permission-mode', 'bypassPermissions',
         '--dangerously-skip-permissions',
         '--output-format', 'text',
         '--model', model,
-        '--append-system-prompt', SYSTEM_PROMPT,
+        '--append-system-prompt', sysprompt,
     ]
     # 채널별 접근 허용 디렉토리. 비우면 cwd만 접근 가능(샌드박스).
     for d in (add_dirs or []):
@@ -339,15 +349,18 @@ def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = 
     if use_gate and gate_cfg.get('mode') == 'escalate':
         sensitive = set(gate_cfg.get('sensitive_tools') or [])
         disallowed = [t for t in (disallowed or []) if t not in sensitive]
+    out_dir = cfg.get('output_dir', '')
     try:
         r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed,
-                        gate=gate_arg, gate_channel=channel, gate_thread=thread_ts)
+                        gate=gate_arg, gate_channel=channel, gate_thread=thread_ts,
+                        output_dir=out_dir)
         # resume 실패 (jsonl 없음) → 새 session으로 재시도
         if r.returncode != 0 and not is_new and 'No conversation found' in (r.stderr or ''):
             log(f'  resume fail, fallback to new session')
             new_sid = reset_session(channel)
             r = _run_claude(prompt, new_sid, True, timeout, model, cwd, add_dirs, disallowed,
-                            gate=gate_arg, gate_channel=channel, gate_thread=thread_ts)
+                            gate=gate_arg, gate_channel=channel, gate_thread=thread_ts,
+                            output_dir=out_dir)
     except subprocess.TimeoutExpired:
         return f'⏱️ 타임아웃 ({timeout}초). 작업이 너무 길어요.'
     if r.returncode != 0:
@@ -409,7 +422,8 @@ def run_scheduled_action(channel: str, prompt: str) -> str | None:
     try:
         r = _run_claude(effective, str(uuid.uuid4()), True, 600,
                         cfg.get('model', 'opus'), cfg.get('cwd'),
-                        cfg.get('add_dirs'), cfg.get('disallowed_tools'))
+                        cfg.get('add_dirs'), cfg.get('disallowed_tools'),
+                        output_dir=cfg.get('output_dir', ''))
     except Exception as e:
         log(f'  scheduled action fail: {e}')
         return None
@@ -654,7 +668,8 @@ def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
         web.chat_postMessage(channel=channel, text=f'폴더를 만들지 못했어요: {e}')
         return True
     CHANNELS[channel]['add_dirs'] = [path]        # 핫리로드 (다음 호출부터 적용)
-    _save_channel_override(channel, {'add_dirs': [path]})  # 재시작에도 유지
+    CHANNELS[channel]['output_dir'] = path        # 기본 저장 위치(시스템 프롬프트 주입)
+    _save_channel_override(channel, {'add_dirs': [path], 'output_dir': path})  # 재시작에도 유지
     web.chat_postMessage(channel=channel, mrkdwn=True,
                          text=f"✅ 저장 폴더를 `{path}` 로 바꿨어요. (즉시 적용)")
     log(f'output dir set ch={channel} -> {path} by {user}')

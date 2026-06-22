@@ -26,6 +26,7 @@
     "mission": "부서 공용 집사. 알리미/FAQ/투표/요약/온보딩.",
     "tasks_enabled": true,
     "output_roots": ["~/Documents/부서공유"],
+    "output_dir": "~/Documents/부서공유/집사 생성물",
     "gate": {
       "enabled": false,
       "mode": "escalate",
