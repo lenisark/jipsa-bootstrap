@@ -63,6 +63,13 @@ class ApprovalTest(unittest.TestCase):
         self.assertIn('승인', dumped)
         self.assertIn('거부', dumped)
 
+    def test_build_card_mentions_approvers(self):
+        tok = self.a.request_approval('T1', 'C1', 'x', approvers=['U_HR'], timeout_min=60)
+        dumped = str(self.a.build_card(tok, 'x', mentions=['U_HR']))
+        self.assertIn('<@U_HR>', dumped)        # escalate: 승인자 멘션
+        plain = str(self.a.build_card(tok, 'x'))
+        self.assertNotIn('<@', plain)            # 기본 모드는 멘션 없음
+
 
 if __name__ == '__main__':
     unittest.main()

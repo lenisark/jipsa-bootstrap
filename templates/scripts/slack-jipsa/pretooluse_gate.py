@@ -46,7 +46,8 @@ def _describe(tool_name: str, tool_input: dict) -> str:
     return f"{tool_name}: {json.dumps(tool_input, ensure_ascii=False)[:300]}"
 
 
-def _post_card(channel: str, thread_ts: str, token: str, desc: str) -> None:
+def _post_card(channel: str, thread_ts: str, token: str, desc: str,
+               mentions: list | None = None) -> None:
     """데몬과 독립적으로 슬랙에 카드 게시(봇 토큰 직접 사용)."""
     from slack_sdk import WebClient
     secrets = Path.home() / '.claude/secrets/slack-jipsa.env'
@@ -56,7 +57,8 @@ def _post_card(channel: str, thread_ts: str, token: str, desc: str) -> None:
             k, v = line.split('=', 1)
             env[k.strip()] = v.strip()
     web = WebClient(token=env['SLACK_BOT_TOKEN'])
-    web.chat_postMessage(channel=channel, blocks=approval.build_card(token, desc),
+    web.chat_postMessage(channel=channel,
+                         blocks=approval.build_card(token, desc, mentions=mentions),
                          text='🔐 승인 요청', thread_ts=thread_ts or None)
 
 
@@ -74,6 +76,8 @@ def main() -> None:
     approvers = [a for a in os.environ.get('JIPSA_GATE_APPROVERS', '').split(',') if a]
     timeout_min = int(os.environ.get('JIPSA_GATE_TIMEOUT_MIN', '15') or '15')
     thread_ts = os.environ.get('JIPSA_GATE_THREAD', '')
+    mode = os.environ.get('JIPSA_GATE_MODE', 'block')
+    card_mentions = approvers if mode == 'escalate' else None   # 부서: 승인자 호출
 
     tasks.init_db()
     # 게이트 1건 = task(막힘) + approval(대기)
@@ -83,7 +87,7 @@ def main() -> None:
     tasks.set_state(tid, '진행'); tasks.set_state(tid, '막힘')
     token = approval.request_approval(tid, channel, desc, approvers, timeout_min, thread_ts)
     try:
-        _post_card(channel, thread_ts, token, desc)
+        _post_card(channel, thread_ts, token, desc, mentions=card_mentions)
     except Exception as e:
         _allow(f'카드 게시 실패({e}) — 운영중단 방지 위해 통과')  # fail-open: 게이트가 작업을 막지 않게
 

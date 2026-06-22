@@ -47,6 +47,37 @@ def set_logger(fn) -> None:
     log = fn
 
 
+# 알리미 2.0: 능동 작업 실행기(daemon 이 call_claude 래퍼를 주입). 미설정이면 액션 비활성.
+_executor = None
+
+
+def set_executor(fn) -> None:
+    """fn(channel, prompt) -> str|None 를 등록. 스케줄된 작업을 에이전트가 실행."""
+    global _executor
+    _executor = fn
+
+
+def _run_action(web, r: dict) -> None:
+    """능동 작업 알림 발사: 에이전트 실행 → 결과를 채널에 보고. (lock 밖 비동기 호출)"""
+    ch = r.get('channel')
+    label = r.get('message') or '자동 작업'
+    try:
+        out = _executor(ch, r.get('action') or '')
+    except Exception as e:
+        log(f'action exec err id={r.get("id")}: {e}')
+        out = None
+    try:
+        if out:
+            web.chat_postMessage(channel=ch, mrkdwn=True,
+                                 text=f"🤖 *자동 작업: {label}*\n\n{out}")
+        else:
+            web.chat_postMessage(channel=ch, mrkdwn=True,
+                                 text=f"🤖 자동 작업을 끝내지 못했어요: {label}")
+        log(f"action fired id={r.get('id')} ch={ch}")
+    except Exception as e:
+        log(f'action post fail id={r.get("id")}: {e}')
+
+
 # ── 공휴일 / 영업일 판정 ────────────────────────────────────────────
 def _kr_holidays(year: int):
     if year not in _kr_cache:
@@ -129,6 +160,7 @@ def add_reminder(channel: str, user: str, spec: dict) -> dict:
         'minute': int(spec.get('minute', 0)),
         'message': (spec.get('message') or '').strip(),
         'mentions': list(spec.get('mentions') or []),
+        'action': (spec.get('action') or '').strip(),   # 알리미 2.0: 능동 작업 지시문
         'created_by': user,
         'created_at': datetime.now(KST).date().isoformat(),
         'enabled': True,
@@ -217,8 +249,43 @@ _TRIG = re.compile(
 )
 
 
+# ── 알리미 2.0: 능동 작업(에이전트가 실행+보고) 감지 ────────────────
+_ACTION_VERB = re.compile(r'(요약|정리|분석|작성|조사|점검|집계|리포트|보고서|브리핑|확인)')
+_ACTION_POST = re.compile(r'(올려|올려줘|게시|공유|보고|브리핑|전해|작성해|알려\s*줘)')
+_ACTION_MARK = re.compile(r'자동')
+_SCHED_ANY = re.compile(r'(매월|매달|매주|매일|매월말|말일|날마다'
+                        r'|\d{1,2}\s*월\s*\d{1,2}\s*일|오늘|내일|모레|글피)')
+
+
+def _is_action_text(text: str) -> bool:
+    """능동 작업 알림인가? 스케줄 + (자동 마커 OR 작업동사+보고동사)."""
+    if not _SCHED_ANY.search(text or ''):
+        return False
+    if _ACTION_MARK.search(text):
+        return True
+    return bool(_ACTION_VERB.search(text) and _ACTION_POST.search(text))
+
+
+def _extract_action(text: str) -> str:
+    """능동 작업 알림의 '지시문' 추출 — 스케줄/시간/멘션만 제거, 작업 지시는 보존."""
+    s = text
+    s = _MENTION.sub(' ', s)
+    s = _WEEKLY.sub(' ', s)
+    s = _DAILY.sub(' ', s)
+    s = _DAY.sub(' ', s)
+    s = _LAST_DAY.sub(' ', s)
+    s = _ONCE_MD.sub(' ', s)
+    s = _LEAD.sub(' ', s)
+    s = _TIME_COLON.sub(' ', s)
+    s = _TIME_HM.sub(' ', s)
+    s = re.sub(r'(매월|매달|매주|매일|날마다|정오|자정|오늘|내일|모레|글피|하루\s*전|미리|자동)', ' ', s)
+    s = re.sub(r'([월화수목금토일])\s*요일', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s.strip(' .,!~·-')
+
+
 def looks_like_reminder(text: str) -> bool:
-    return bool(_TRIG.search(text or ''))
+    return bool(_TRIG.search(text or '')) or _is_action_text(text or '')
 
 
 def _detect_action(text: str) -> str:
@@ -319,6 +386,11 @@ def parse_intent(text: str) -> dict:
         base = {'hour': hour, 'minute': minute,
                 'message': _extract_message(text) or None,
                 'mentions': _MENTION.findall(text)}
+        # 알리미 2.0: 능동 작업이면 지시문을 action 에 담는다(에이전트가 실행+보고).
+        if _is_action_text(text):
+            base['action'] = _extract_action(text)
+            if not base['message']:
+                base['message'] = (base['action'] or '')[:40]
         # 주기 판별 (우선순위: 매주 > 매일 > 매월 > 1회성)
         mw = _WEEKLY.search(text)
         if mw:
@@ -507,10 +579,11 @@ def _handle_add(web, channel, user, intent) -> None:
     lead_line = ''
     if item.get('lead_days'):
         lead_line = "\n• 사전 알림: " + ', '.join(f'{n}일 전' for n in item['lead_days'])
+    kind_line = "\n• 🤖 *능동 작업* — 그 시각에 집사가 직접 처리하고 결과를 보고해요." if item.get('action') else ''
     web.chat_postMessage(channel=channel, mrkdwn=True, text=(
         f"✅ 알림 등록 완료\n"
         f"• {_describe(item)}{lead_line}\n"
-        f"• 내용: {msg}{call_line}{note}\n"
+        f"• 내용: {msg}{call_line}{kind_line}{note}\n"
         f"_목록: `알림 목록`  ·  삭제: `N번 알림 삭제`_"))
 
 
@@ -528,7 +601,8 @@ def _handle_list(web, channel) -> None:
         lead = ''
         if r.get('lead_days'):
             lead = ' (+' + ', '.join(f'{x}일전' for x in r['lead_days']) + ')'
-        lines.append(f"{n}. {_describe(r)}{lead} — {r['message']}{call}")
+        tag = '🤖 ' if r.get('action') else ''
+        lines.append(f"{n}. {tag}{_describe(r)}{lead} — {r['message']}{call}")
     web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
 
 
@@ -559,6 +633,10 @@ def _handle_edit(web, channel, target, changes) -> None:
 # ── 스케줄러 ──────────────────────────────────────────────────────
 def _post_fire(web, r: dict, target: date, eff: date,
                late_from: date = None, lead_days_before: int = 0) -> None:
+    # 알리미 2.0: action 이 있으면 에이전트가 실행+보고(본 알림만, 사전알림 제외).
+    if r.get('action') and _executor is not None and not lead_days_before:
+        threading.Thread(target=_run_action, args=(web, r), daemon=True).start()
+        return
     mentions = r.get('mentions') or []
     if lead_days_before:
         head = f"⏳ *사전 알림 (D-{lead_days_before})* — {_describe(r)} 예정\n"

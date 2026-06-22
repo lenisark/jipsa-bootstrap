@@ -24,6 +24,14 @@
     "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"],
     "require_mention": true,
     "mission": "부서 공용 집사. 알리미/FAQ/투표/요약/온보딩.",
-    "tasks_enabled": true
+    "tasks_enabled": true,
+    "gate": {
+      "enabled": false,
+      "mode": "escalate",
+      "sensitive_tools": ["Write", "Edit"],
+      "approvers": ["U_HRADMIN_SLACK_ID"],
+      "timeout_min": 60,
+      "on_timeout": "deny"
+    }
   }
 }

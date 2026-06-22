@@ -11,6 +11,7 @@ import time
 import uuid
 import sqlite3
 from pathlib import Path
+from contextlib import closing
 
 BASE = Path.home() / '.claude/scripts/slack-jipsa'
 DB_PATH = BASE / 'jipsa.db'          # 테스트는 이 전역을 임시경로로 교체
@@ -38,7 +39,7 @@ def _conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         c.execute('''CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY, channel_id TEXT, title TEXT, body TEXT,
             state TEXT, direction TEXT, assignee TEXT, thread_ts TEXT,
@@ -55,7 +56,7 @@ def create_task(channel_id: str, title: str, body: str = '', direction: str = 'h
                 assignee: str = 'agent', thread_ts: str = '', meta: dict | None = None) -> str:
     tid = str(uuid.uuid4())
     now = int(time.time())
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         c.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                   (tid, channel_id, title, body, '대기', direction, assignee,
                    thread_ts, now, now, json.dumps(meta or {}, ensure_ascii=False)))
@@ -63,7 +64,7 @@ def create_task(channel_id: str, title: str, body: str = '', direction: str = 'h
 
 
 def get_task(task_id: str) -> dict | None:
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         r = c.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
     return dict(r) if r else None
 
@@ -75,7 +76,7 @@ def list_tasks(channel_id: str, states: tuple[str, ...] | None = None) -> list[d
         q += ' AND state IN (%s)' % ','.join('?' * len(states))
         args += list(states)
     q += ' ORDER BY created_at DESC'
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         return [dict(r) for r in c.execute(q, args).fetchall()]
 
 
@@ -88,7 +89,7 @@ def set_state(task_id: str, state: str) -> bool:
         return False
     if state not in _TRANSITIONS.get(cur['state'], set()):
         return False
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         c.execute('UPDATE tasks SET state=?, updated_at=? WHERE id=?',
                   (state, int(time.time()), task_id))
     return True
@@ -98,6 +99,6 @@ def update_task(task_id: str, **fields) -> None:
     if not fields:
         return
     cols = ', '.join(f'{k}=?' for k in fields)
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         c.execute(f'UPDATE tasks SET {cols}, updated_at=? WHERE id=?',
                   (*fields.values(), int(time.time()), task_id))

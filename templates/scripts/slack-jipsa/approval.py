@@ -10,6 +10,7 @@ import time
 import uuid
 import sqlite3
 from pathlib import Path
+from contextlib import closing
 
 BASE = Path.home() / '.claude/scripts/slack-jipsa'
 DB_PATH = BASE / 'jipsa.db'          # 테스트가 교체하는 전역
@@ -28,7 +29,7 @@ def request_approval(task_id: str, channel_id: str, action_desc: str,
     """approvals 행을 status=대기 로 INSERT 하고 단일사용 토큰 반환."""
     token = str(uuid.uuid4())
     now = int(time.time())
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         c.execute('INSERT INTO approvals (token,task_id,channel_id,action_desc,status,'
                   'approver_id,approvers,requested_at,decided_at,expires_at,thread_ts) '
                   'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
@@ -39,7 +40,7 @@ def request_approval(task_id: str, channel_id: str, action_desc: str,
 
 
 def get_approval(token: str) -> dict | None:
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         r = c.execute('SELECT * FROM approvals WHERE token=?', (token,)).fetchone()
     return dict(r) if r else None
 
@@ -50,7 +51,7 @@ def decide(token: str, approver_id: str, approve: bool = True) -> str:
     반환: '승인' | '거부' | '권한없음' | '이미처리' | '만료' | '없음'
     """
     now = int(time.time())
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         r = c.execute('SELECT * FROM approvals WHERE token=?', (token,)).fetchone()
         if not r:
             return '없음'
@@ -76,7 +77,7 @@ def decide(token: str, approver_id: str, approve: bool = True) -> str:
 def expire_stale() -> int:
     """기한 지난 대기 행을 만료 처리. 만료된 건수 반환(요청자 알림용)."""
     now = int(time.time())
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         cur = c.execute('UPDATE approvals SET status=? WHERE status=? AND expires_at <= ?',
                         ('만료', '대기', now))
         return cur.rowcount
@@ -84,17 +85,23 @@ def expire_stale() -> int:
 
 def list_expired_since(since_ts: int) -> list[dict]:
     """sweeper가 알림 보낼 대상: 최근 만료된 행."""
-    with _conn() as c:
+    with closing(_conn()) as c, c:
         rows = c.execute('SELECT * FROM approvals WHERE status=? AND expires_at >= ?',
                          ('만료', since_ts)).fetchall()
     return [dict(r) for r in rows]
 
 
-def build_card(token: str, action_desc: str) -> list:
-    """슬랙 Block Kit 승인 카드. 버튼 value 에 token 바인딩."""
+def build_card(token: str, action_desc: str, mentions: list[str] | None = None) -> list:
+    """슬랙 Block Kit 승인 카드. 버튼 value 에 token 바인딩.
+
+    mentions: escalate 모드에서 승인자 slack_id 목록. 카드 상단에 <@UID> 로 호출.
+    """
+    head = '🔐 *승인 요청*'
+    if mentions:
+        head += '\n' + ' '.join(f'<@{u}>' for u in mentions) + ' 승인이 필요해요.'
     return [
         {'type': 'section', 'text': {'type': 'mrkdwn',
-            'text': f'🔐 *승인 요청*\n```{action_desc[:500]}```\n_승인하면 실행, 거부하면 차단합니다._'}},
+            'text': f'{head}\n```{action_desc[:500]}```\n_승인하면 실행, 거부하면 차단합니다._'}},
         {'type': 'actions', 'block_id': f'gate_{token}', 'elements': [
             {'type': 'button', 'style': 'primary', 'text': {'type': 'plain_text', 'text': '✅ 승인'},
              'action_id': 'gate_approve', 'value': token},

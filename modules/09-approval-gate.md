@@ -39,10 +39,10 @@ PreToolUse 훅(`pretooluse_gate.py`)은 Claude Code가 민감 도구 호출 직�
 
 ### 2. PreToolUse 훅 등록 (.claude/settings.json)
 
-`templates/scripts/slack-jipsa/.claude/settings.json.tmpl`을 `~/.claude/scripts/slack-jipsa/.claude/settings.json`로 배치하고 `__PYTHON__`을 OS에 맞게 치환한다.
+`templates/scripts/slack-jipsa/.claude/settings.json.tmpl`을 `~/.claude/scripts/slack-jipsa/.claude/settings.json`로 배치하고 두 토큰을 치환한다.
 
-- Windows: `python`
-- macOS / Linux: `python3`
+- `__PYTHON__` — Windows `python` / macOS·Linux `python3`
+- `__GATE_DIR__` — `pretooluse_gate.py`의 **절대경로 디렉토리** = `~/.claude/scripts/slack-jipsa`를 홈 전개한 실제 경로 (예: `/Users/이름/.claude/scripts/slack-jipsa`, Windows는 `C:\Users\이름\.claude\scripts\slack-jipsa`). 절대경로라 부서 채널(cwd=slack-team)에서도 같은 훅 파일을 가리킨다.
 
 ```json
 {
@@ -52,7 +52,7 @@ PreToolUse 훅(`pretooluse_gate.py`)은 Claude Code가 민감 도구 호출 직�
         "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           { "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/pretooluse_gate.py\"",
+            "command": "python3 \"/Users/이름/.claude/scripts/slack-jipsa/pretooluse_gate.py\"",
             "timeout": 1000 }
         ]
       }
@@ -61,7 +61,7 @@ PreToolUse 훅(`pretooluse_gate.py`)은 Claude Code가 민감 도구 호출 직�
 }
 ```
 
-> `timeout`(초)은 게이트 `timeout_min` × 60 + 여유보다 커야 한다. 훅 기본 타임아웃은 600초(10분)라, 15분 게이트를 쓰려면 위처럼 늘려야 한다.
+> `timeout`(초)은 게이트 `timeout_min` × 60 + 여유보다 커야 한다. 훅 기본 타임아웃은 600초(10분)라, 15분 게이트를 쓰려면 위처럼 늘려야 한다. 부서 60분 게이트면 `3700` 이상으로.
 
 ### 3. 슬랙 앱 — Interactivity 켜기
 
@@ -88,6 +88,48 @@ PreToolUse 훅(`pretooluse_gate.py`)은 Claude Code가 민감 도구 호출 직�
 - **승인해도 진행이 안 된다** → 훅 `timeout`이 `timeout_min`보다 짧을 수 있다. settings의 `timeout`을 늘려라.
 - **노션 턴 로그가 중복으로 쌓인다** → 게이트 채널은 `CLAUDE_SKIP_HOOKS`를 해제하므로, 사용자 `~/.claude/settings.json`에 Stop 훅이 있으면 같이 발동할 수 있다. settings.json에 `"Stop": []`를 추가해 무력화하면 된다.
 
-## 부서 채널은?
+## 부서 채널 — 권한 상승(escalate) 게이트
 
-부서 escalate 게이트(차단 대신 승인요청)는 다음 단계(Phase C)다. 이 모듈은 **개인 채널 차단 게이트**까지만 다룬다. 부서 채널에는 `gate`를 켜지 말 것(`mode: escalate`는 아직 미구현이라 게이트가 작동하지 않음).
+부서 채널은 평소 `disallowed_tools`로 Write/Edit를 **하드 차단**한다(읽기·Q&A 전용). escalate 게이트는 "차단" 대신 **"승인 요청 → 지정 승인자(예: 인사총무) 멘션 → 승인되면 통제된 경로로 실행"**으로 바꾼다. 안전성은 유지하면서 부서 집사가 할 수 있는 일이 늘어난다.
+
+### 동작 차이 (개인 block vs 부서 escalate)
+
+| | 개인(block) | 부서(escalate) |
+|---|---|---|
+| 평소 민감 도구 | 호출 가능(풀권한) | `disallowed_tools`로 차단 |
+| 게이트 켜면 | 호출 직전 본인 승인 | 민감 도구를 풀고, 호출 직전 **승인자 멘션** 후 대기 |
+| 승인자 | 본인 | 부서 승인자(HR 등) |
+| 카드 | 버튼만 | `<@승인자>` 멘션 + 버튼 |
+
+내부적으로는 같은 PreToolUse 게이트를 쓴다. escalate면 데몬이 `gate.sensitive_tools`를 `disallowed_tools`에서 빼서 호출 가능케 하되, 그 도구는 반드시 게이트를 거친다.
+
+### 부서 채널 셋업
+
+1. `channels.json` 부서 항목에 `gate` 추가:
+
+```json
+"C_TEAM_CHANNEL_ID": {
+  "...": "...",
+  "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"],
+  "gate": {
+    "enabled": false,
+    "mode": "escalate",
+    "sensitive_tools": ["Write", "Edit"],
+    "approvers": ["U_HRADMIN_SLACK_ID"],
+    "timeout_min": 60,
+    "on_timeout": "deny"
+  }
+}
+```
+
+- `sensitive_tools` — 게이트로 풀어줄 도구(승인 시 실행). 여기 없는 도구(예: Bash)는 계속 하드 차단된다.
+- `approvers` — 부서 승인 권한자(HR 등). 카드에서 이 사람들을 멘션한다.
+- `timeout_min` — 부서는 사람이 늦게 볼 수 있으니 60 권장. 훅 `timeout`도 그에 맞게(>3700s).
+
+2. **부서 채널 cwd에도 settings.json 배치** — `.claude/settings.json`을 `~/.claude/scripts/slack-team/.claude/settings.json`에도 같은 내용으로 둔다(`__GATE_DIR__`가 절대경로라 내용 동일). slack-team에는 `pretooluse_gate.py`를 복사할 필요 없음 — 훅은 slack-jipsa의 파일을 절대경로로 실행한다.
+
+3. 슬랙 Interactivity ON(개인과 동일), `enabled: true`로 롤아웃.
+
+### 부서 채널 주의 — 무한 승인요청 금지
+
+부서 집사가 할 수 없는 일(권한 밖)을 자꾸 시도해 승인 요청을 남발하지 않도록, `slack-team/CLAUDE.md`에 "정말 필요할 때만 쓰기 작업을 시도하고, 애매하면 정중히 거절하라"는 가이드를 둔다. 게이트는 실제 도구 호출이 있을 때만 발동하므로, 페르소나가 1차 방어선이다.

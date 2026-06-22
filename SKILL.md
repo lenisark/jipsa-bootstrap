@@ -48,7 +48,7 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 - `templates/run.ps1.tmpl` / `templates/run.sh.tmpl` — `{PYTHON_PATH}` 치환
 - `templates/win-task-slack-jipsa.xml.tmpl` — `{USERNAME}` `{HOME}` 치환 (Windows)
 - `templates/launchd-*.plist.tmpl` (macOS) / `templates/systemd-*.tmpl` (Linux)
-- `templates/scripts/slack-jipsa/.claude/settings.json.tmpl` — `__PYTHON__` 치환 (Windows=`python`, mac/linux=`python3`) → `~/.claude/scripts/slack-jipsa/.claude/settings.json` (모듈 9, 승인 게이트 켤 때만)
+- `templates/scripts/slack-jipsa/.claude/settings.json.tmpl` — `__PYTHON__`(Windows=`python`, mac/linux=`python3`) + `__GATE_DIR__`(slack-jipsa 절대경로) 치환 → `~/.claude/scripts/slack-jipsa/.claude/settings.json` (escalate 쓰면 `~/.claude/scripts/slack-team/.claude/settings.json`에도 같은 내용 배치) (모듈 9, 승인 게이트 켤 때만)
 
 ### D. AI 책임 — OS 분기
 
@@ -80,7 +80,7 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
 2. **모듈 5** (멀티채널) — `channels.json` 작성. ①②③ 모두 권장.
 3. **모듈 6/7** — 선택에 따라 개인/부서.
 4. **모듈 2/3/4** — 폴더 트리거·노션 (선택).
-5. **모듈 8/9 (jipsa 2.0, 선택)** — 작업 객체 → 개인 채널 승인 게이트. 8 먼저, 그 위에 9. 게이트는 개인 채널 셋업(모듈 6) 후 권장.
+5. **모듈 8/9/10 (jipsa 2.0, 선택)** — 작업 객체(8) → 승인 게이트(9, 개인 block + 부서 escalate) → 알리미 2.0 능동 실행(10). 8 먼저, 그 위에 9. 10은 모듈 7 알리미 위에 얹힘.
 
 ## OS별 분기 로직
 
@@ -132,7 +132,8 @@ Interactivity: 승인 게이트(모듈 9)를 쓸 때만 **Interactivity & Shortc
 - **모듈 7** — 부서 채널(sonnet/all/샌드박스/@멘션) + `slack-team/` 작업폴더 + docs FAQ + 팀 기능 검증 + 온보딩 메시지.
 - **모듈 2/3/4** — 폴더 트리거·노션 (선택).
 - **모듈 8 (2.0)** — `tasks.py` 카피 → `channels.json`에 `tasks_enabled: true` → 재시작 → `작업목록` 검증.
-- **모듈 9 (2.0)** — `tasks.py`·`approval.py`·`pretooluse_gate.py` 카피 → `.claude/settings.json` 배치(`__PYTHON__` 치환) → 슬랙 Interactivity ON → `channels.json` `gate` 추가 → 단계적 롤아웃(`enabled:false`→테스트→`true`).
+- **모듈 9 (2.0)** — `tasks.py`·`approval.py`·`pretooluse_gate.py` 카피 → `.claude/settings.json` 배치(`__PYTHON__`·`__GATE_DIR__` 치환, 개인=slack-jipsa / 부서 escalate면 slack-team 에도) → 슬랙 Interactivity ON → `channels.json` `gate` 추가(개인 `mode` 생략=block / 부서 `mode:escalate`) → 단계적 롤아웃(`enabled:false`→테스트→`true`).
+- **모듈 10 (2.0)** — 최신 `reminders.py`·`daemon.py` 확인(`set_executor`/`run_scheduled_action` 포함) → 재시작 → `매일 9시에 어제 FAQ 요약해서 올려줘` 같은 능동 작업 등록 → 🤖 결과 게시 확인.
 
 코드 카피 예시 (mac/linux):
 ```bash

@@ -276,6 +276,7 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
         env['JIPSA_GATE_THREAD'] = gate_thread or ''
         env['JIPSA_GATE_APPROVERS'] = ','.join(gate.get('approvers', []))
         env['JIPSA_GATE_TIMEOUT_MIN'] = str(gate.get('timeout_min', 15))
+        env['JIPSA_GATE_MODE'] = gate.get('mode', 'block')   # block(개인) | escalate(부서)
     cmd = [
         'claude', '--print',
         '--permission-mode', 'bypassPermissions',
@@ -305,10 +306,14 @@ def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = 
     cwd = cfg.get('cwd')
     add_dirs = cfg.get('add_dirs')
     disallowed = cfg.get('disallowed_tools')
-    # 승인 게이트: 개인 차단 게이트만(Phase B). 부서 escalate(mode=escalate)는 Phase C.
+    # 승인 게이트: 개인 차단(block) + 부서 권한상승(escalate) 둘 다 지원.
     gate_cfg = cfg.get('gate') or {}
-    use_gate = bool(gate_cfg.get('enabled')) and gate_cfg.get('mode', 'block') != 'escalate'
+    use_gate = bool(gate_cfg.get('enabled'))
     gate_arg = gate_cfg if use_gate else None
+    # escalate: 평소 disallowed인 민감 도구를 풀어 호출 가능케 하되 게이트로 통제.
+    if use_gate and gate_cfg.get('mode') == 'escalate':
+        sensitive = set(gate_cfg.get('sensitive_tools') or [])
+        disallowed = [t for t in (disallowed or []) if t not in sensitive]
     try:
         r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed,
                         gate=gate_arg, gate_channel=channel, gate_thread=thread_ts)
@@ -325,6 +330,34 @@ def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = 
         log(f'  claude fail rc={r.returncode}: {(r.stderr or "")[-300:]}')
         return '__SILENT_FAIL__'
     return (r.stdout or '').strip()
+
+
+def run_scheduled_action(channel: str, prompt: str) -> str | None:
+    """알리미 2.0 실행기 — 스케줄된 작업을 새 세션으로 실행하고 결과 반환.
+
+    - 새 세션(대화 오염 방지) · 게이트 없음(스케줄은 알림 생성 시 사전승인된 것).
+    - 채널의 disallowed_tools 유지 → 부서 채널은 읽기전용(요약 등), 개인은 풀권한.
+    """
+    cfg = CHANNELS.get(channel, {})
+    try:
+        r = _run_claude(prompt, str(uuid.uuid4()), True, 600,
+                        cfg.get('model', 'opus'), cfg.get('cwd'),
+                        cfg.get('add_dirs'), cfg.get('disallowed_tools'))
+    except Exception as e:
+        log(f'  scheduled action fail: {e}')
+        return None
+    if r.returncode != 0:
+        log(f'  scheduled action rc={r.returncode}: {(r.stderr or "")[-200:]}')
+        return None
+    out = (r.stdout or '').strip()
+    if not out:
+        return None
+    try:
+        sys.path.insert(0, str(Path.home() / '.claude/scripts'))
+        from lib.slack_mrkdwn import to_mrkdwn
+        return to_mrkdwn(out)
+    except Exception:
+        return out
 
 
 # ── 대화 요약 (팀 협업) ────────────────────────────────────────────
@@ -1097,6 +1130,8 @@ def main() -> None:
     # 알리미 스케줄러 스레드 시작
     if rmd is not None:
         rmd.set_logger(log)
+        if hasattr(rmd, 'set_executor'):
+            rmd.set_executor(run_scheduled_action)   # 알리미 2.0: 능동 작업 실행기
         threading.Thread(target=rmd.reminder_loop, args=(web,), daemon=True).start()
     else:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
