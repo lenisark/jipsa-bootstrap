@@ -19,6 +19,8 @@
 | **5. 멀티채널 권한분리** | `channels.json`으로 채널별 모델·권한·샌드박스 분리 | ★ 핵심 |
 | **6. 개인 집사** | Opus · 홈 풀권한 · 본인 전용 | ★ |
 | **7. 부서 공용 집사** | Sonnet · 샌드박스 · @멘션 · 알리미/완료체크/투표/위키/요약/FAQ | ★ |
+| **8. 작업 객체** (2.0) | 휘발성 대화를 상태 가진 task로 승격(대기/진행/막힘/완료). 데몬 재시작에도 복구 | 선택 |
+| **9. 승인 게이트** (2.0) | 개인 채널 민감 도구 직전 슬랙 `[승인][거부]` 후 대기. 폰으로 원격 승인 | 선택 |
 
 ### 부서 집사 기능
 
@@ -82,6 +84,7 @@ Claude가 자동으로 OS 확인 → 깔 모듈 선택 → 슬랙 앱/토큰 안
 2. **검증된 코드 그대로** — `templates/` 안은 운영 환경에서 매일 도는 실코드. 결합은 `.env`·`channels.json`으로만
 3. **시크릿은 로컬에만** — 토큰은 `~/.claude/secrets/`, 채널ID는 `channels.json`(둘 다 git 제외)
 4. **부서 채널은 샌드박스** — 전용 폴더 밖 접근 차단 + 읽기/Q&A 전용으로 공용 안전성 확보
+5. **휘발성 대화 → 추적 가능한 작업** (2.0) — SQLite 작업 객체 위에 슬랙 버튼 승인 게이트를 얹어, 에이전트가 사람에게 먼저 보고·요청하는 양방향으로. 전부 로컬·슬랙 네이티브 (웹 대시보드 없음)
 
 ---
 
@@ -99,12 +102,14 @@ jipsa-bootstrap/
 │   ├── 04-notion-archive.md
 │   ├── 05-multichannel.md       ← channels.json 권한·모델 분리
 │   ├── 06-personal-jipsa.md     ← 개인 집사
-│   └── 07-team-jipsa.md         ← 부서 집사
+│   ├── 07-team-jipsa.md         ← 부서 집사
+│   ├── 08-task-layer.md         ← 작업 객체 (2.0)
+│   └── 09-approval-gate.md      ← 승인 게이트 (2.0)
 └── templates/
     ├── lib/               ← 검증 라이브러리 (그대로 카피)
     ├── hooks/             ← Stop hook
     ├── scripts/
-    │   ├── slack-jipsa/   ← 멀티채널 daemon.py + reminders.py + channels.json.example + CLAUDE.md
+    │   ├── slack-jipsa/   ← daemon.py + reminders.py + tasks.py + approval.py + pretooluse_gate.py + .claude/settings.json.tmpl + channels.json.example + CLAUDE.md
     │   └── slack-team/    ← 부서 작업폴더 (CLAUDE.md + docs/FAQ)
     ├── run.ps1.tmpl / run.sh.tmpl
     ├── win-task-*.xml.tmpl        ← Windows Task Scheduler

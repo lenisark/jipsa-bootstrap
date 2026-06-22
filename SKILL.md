@@ -29,6 +29,9 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 - `templates/hooks/slack-session-summary.sh` → `~/.claude/hooks/slack-session-summary.sh`
 - `templates/scripts/slack-jipsa/daemon.py` → `~/.claude/scripts/slack-jipsa/daemon.py` **(멀티채널)**
 - `templates/scripts/slack-jipsa/reminders.py` → `~/.claude/scripts/slack-jipsa/reminders.py` **(알리미)**
+- `templates/scripts/slack-jipsa/tasks.py` → `~/.claude/scripts/slack-jipsa/tasks.py` **(작업 객체, 모듈 8)**
+- `templates/scripts/slack-jipsa/approval.py` → `~/.claude/scripts/slack-jipsa/approval.py` **(승인 게이트, 모듈 9)**
+- `templates/scripts/slack-jipsa/pretooluse_gate.py` → `~/.claude/scripts/slack-jipsa/pretooluse_gate.py` **(게이트 훅, 모듈 9)**
 - `templates/scripts/slack-jipsa/CLAUDE.md` → `~/.claude/scripts/slack-jipsa/CLAUDE.md` (개인 페르소나, 운영자 수정 OK)
 - `templates/scripts/slack-team/CLAUDE.md` → `~/.claude/scripts/slack-team/CLAUDE.md` (부서 페르소나, 운영자 수정 OK)
 - `templates/scripts/slack-team/docs/README.md` → `~/.claude/scripts/slack-team/docs/README.md`
@@ -45,6 +48,7 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 - `templates/run.ps1.tmpl` / `templates/run.sh.tmpl` — `{PYTHON_PATH}` 치환
 - `templates/win-task-slack-jipsa.xml.tmpl` — `{USERNAME}` `{HOME}` 치환 (Windows)
 - `templates/launchd-*.plist.tmpl` (macOS) / `templates/systemd-*.tmpl` (Linux)
+- `templates/scripts/slack-jipsa/.claude/settings.json.tmpl` — `__PYTHON__` 치환 (Windows=`python`, mac/linux=`python3`) → `~/.claude/scripts/slack-jipsa/.claude/settings.json` (모듈 9, 승인 게이트 켤 때만)
 
 ### D. AI 책임 — OS 분기
 
@@ -61,6 +65,7 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
    ② 부서 공용 집사만 (Sonnet, 샌드박스, 팀 기능)
    ③ 둘 다 (멀티채널)
    + 옵션: 노션 적재 / 폴더 트리거
+   + 2.0 옵션: 작업 객체(모듈 8) / 승인 게이트(모듈 9, 개인 채널)
 3. Claude Code · Python 설치돼 있죠? (네/아니오)
 ```
 
@@ -75,6 +80,7 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
 2. **모듈 5** (멀티채널) — `channels.json` 작성. ①②③ 모두 권장.
 3. **모듈 6/7** — 선택에 따라 개인/부서.
 4. **모듈 2/3/4** — 폴더 트리거·노션 (선택).
+5. **모듈 8/9 (jipsa 2.0, 선택)** — 작업 객체 → 개인 채널 승인 게이트. 8 먼저, 그 위에 9. 게이트는 개인 채널 셋업(모듈 6) 후 권장.
 
 ## OS별 분기 로직
 
@@ -114,6 +120,7 @@ pip install slack_sdk holidays
 Bot Token Scopes: `chat:write`, `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`, `reactions:read`, `reactions:write`
 Event Subscriptions: `message.channels`, `message.groups`, `reaction_added`
 Socket Mode: 켜기. 스코프 변경 후 **앱 재설치** 필수.
+Interactivity: 승인 게이트(모듈 9)를 쓸 때만 **Interactivity & Shortcuts** 토글 ON (Socket Mode라 URL 불필요). 버튼 클릭(block_actions) 수신용.
 
 ## 모듈별 진행
 
@@ -124,6 +131,8 @@ Socket Mode: 켜기. 스코프 변경 후 **앱 재설치** 필수.
 - **모듈 6** — 개인 채널(opus/owner/풀권한) + `slack-jipsa/CLAUDE.md`.
 - **모듈 7** — 부서 채널(sonnet/all/샌드박스/@멘션) + `slack-team/` 작업폴더 + docs FAQ + 팀 기능 검증 + 온보딩 메시지.
 - **모듈 2/3/4** — 폴더 트리거·노션 (선택).
+- **모듈 8 (2.0)** — `tasks.py` 카피 → `channels.json`에 `tasks_enabled: true` → 재시작 → `작업목록` 검증.
+- **모듈 9 (2.0)** — `tasks.py`·`approval.py`·`pretooluse_gate.py` 카피 → `.claude/settings.json` 배치(`__PYTHON__` 치환) → 슬랙 Interactivity ON → `channels.json` `gate` 추가 → 단계적 롤아웃(`enabled:false`→테스트→`true`).
 
 코드 카피 예시 (mac/linux):
 ```bash
@@ -131,6 +140,7 @@ mkdir -p ~/.claude/scripts/lib ~/.claude/scripts/slack-jipsa ~/.claude/scripts/s
 cp templates/lib/*.py ~/.claude/scripts/lib/ && touch ~/.claude/scripts/lib/__init__.py
 cp templates/lib/md_to_notion.py ~/.claude/hooks/
 cp templates/scripts/slack-jipsa/daemon.py templates/scripts/slack-jipsa/reminders.py ~/.claude/scripts/slack-jipsa/
+cp templates/scripts/slack-jipsa/tasks.py templates/scripts/slack-jipsa/approval.py templates/scripts/slack-jipsa/pretooluse_gate.py ~/.claude/scripts/slack-jipsa/   # 2.0 (모듈 8/9)
 cp templates/scripts/slack-jipsa/CLAUDE.md ~/.claude/scripts/slack-jipsa/
 cp templates/scripts/slack-jipsa/channels.json.example ~/.claude/scripts/slack-jipsa/channels.json   # 후 채널ID 치환
 cp -r templates/scripts/slack-team/* ~/.claude/scripts/slack-team/
