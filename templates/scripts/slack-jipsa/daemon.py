@@ -332,15 +332,57 @@ def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = 
     return (r.stdout or '').strip()
 
 
+# 스케줄 작업이 '채널 대화 요약' 의도인지 (그러면 히스토리 주입 필요)
+_CONV_SUMMARY = re.compile(r'(대화|채팅|채널|회의|스레드|메시지|논의).{0,8}(요약|정리|분석|브리핑|정리)')
+
+
+def _collect_channel_text(channel: str, limit: int = 300) -> str:
+    """채널 최근 메시지를 '[MM-DD HH:MM] 이름: 내용' 형식으로 수집(시각 포함)."""
+    try:
+        resp = web.conversations_history(channel=channel, limit=limit)
+    except Exception as e:
+        log(f'  history fetch fail: {e}')
+        return ''
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    kst = _tz(_td(hours=9))
+    lines = []
+    for m in reversed(resp.get('messages', [])):
+        if m.get('subtype') or m.get('user') == BOT:
+            continue
+        txt = (m.get('text') or '').strip()
+        if not txt:
+            continue
+        nm = _resolve_name(m.get('user') or m.get('bot_id') or '?')
+        try:
+            stamp = _dt.fromtimestamp(float(m.get('ts', '0')), kst).strftime('%m-%d %H:%M')
+            lines.append(f'[{stamp}] {nm}: {txt}')
+        except Exception:
+            lines.append(f'{nm}: {txt}')
+    return '\n'.join(lines)[-8000:]
+
+
 def run_scheduled_action(channel: str, prompt: str) -> str | None:
     """알리미 2.0 실행기 — 스케줄된 작업을 새 세션으로 실행하고 결과 반환.
 
     - 새 세션(대화 오염 방지) · 게이트 없음(스케줄은 알림 생성 시 사전승인된 것).
     - 채널의 disallowed_tools 유지 → 부서 채널은 읽기전용(요약 등), 개인은 풀권한.
+    - '대화 요약' 의도면 채널 히스토리를 가져와 프롬프트에 주입(claude는 슬랙 접근 불가).
     """
     cfg = CHANNELS.get(channel, {})
+    effective = prompt
+    if _CONV_SUMMARY.search(prompt):
+        convo = _collect_channel_text(channel)
+        if convo:
+            effective = (
+                "다음은 이 슬랙 채널의 최근 대화 기록입니다(시각은 KST). "
+                "이를 근거로 아래 지시를 수행하세요. 기록에 없는 내용은 지어내지 마세요.\n\n"
+                f"[대화 기록]\n{convo}\n\n[지시]\n{prompt}")
+        else:
+            effective = (f"{prompt}\n\n"
+                         "(참고: 이 채널의 최근 대화 기록을 가져오지 못했습니다 — "
+                         "히스토리 읽기 권한이 없을 수 있어요. 그 사실만 간단히 보고하세요.)")
     try:
-        r = _run_claude(prompt, str(uuid.uuid4()), True, 600,
+        r = _run_claude(effective, str(uuid.uuid4()), True, 600,
                         cfg.get('model', 'opus'), cfg.get('cwd'),
                         cfg.get('add_dirs'), cfg.get('disallowed_tools'))
     except Exception as e:
