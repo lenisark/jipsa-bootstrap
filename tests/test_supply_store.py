@@ -35,7 +35,9 @@ class StockIOTest(unittest.TestCase):
     def test_excel_lock_detected(self):
         (self.dir / ('~$' + self.stock.name)).write_text('lock')
         self.assertTrue(self.m.is_locked(self.stock))
-        self.assertFalse(self.m.is_locked(self.dir / '비품재고_현황.xlsx2'))
+        unlocked = self.dir / '비품재고_현황_unlocked.xlsx'
+        unlocked.touch()
+        self.assertFalse(self.m.is_locked(unlocked))
 
 
 if __name__ == '__main__':

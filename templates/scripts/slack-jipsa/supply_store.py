@@ -28,8 +28,17 @@ def _atomic_save(wb, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + '.tmp')
-    wb.save(tmp)
-    os.replace(tmp, path)
+    try:
+        wb.save(tmp)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        wb.close()
 
 
 def _to_int(v) -> int:
@@ -46,7 +55,8 @@ def read_stock(path: Path) -> dict:
         return {}
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     if STOCK_SHEET not in wb.sheetnames:
-        wb.close(); return {}
+        wb.close()
+        return {}
     ws = wb[STOCK_SHEET]
     rows = list(ws.iter_rows(values_only=True))
     wb.close()
