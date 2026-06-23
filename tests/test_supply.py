@@ -41,5 +41,42 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(e['qty'], 0)
 
 
+class ResolveTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_normalize(self):
+        n = self.m.normalize_name
+        self.assertEqual(n('  A4 용지 '), 'a4 용지')      # trim+소문자+공백압축
+        self.assertEqual(n('A4용지'), 'a4용지')
+
+    def test_resolve_uses_alias_cache_no_llm(self):
+        calls = []
+        def resolver(raw, known): calls.append(raw); return {'canonical': 'X', 'category': '기타', 'confidence': 'high'}
+        aliases = {'a4용지': 'A4용지'}
+        r = self.m.resolve_item('A4용지', ['A4용지'], aliases, resolver, auto='high')
+        self.assertEqual(r['canonical'], 'A4용지')
+        self.assertEqual(r['status'], 'resolved')
+        self.assertEqual(calls, [])                       # 캐시 적중 → LLM 미호출
+
+    def test_resolve_high_confidence_auto(self):
+        def resolver(raw, known): return {'canonical': 'A4용지', 'category': '사무용품', 'confidence': 'high'}
+        r = self.m.resolve_item('복사용지 A4', ['A4용지'], {}, resolver, auto='high')
+        self.assertEqual(r['status'], 'resolved')
+        self.assertEqual(r['canonical'], 'A4용지')
+        self.assertEqual(r['alias_norm'], '복사용지 a4')     # 캐시에 기록될 키
+
+    def test_resolve_low_confidence_pending(self):
+        def resolver(raw, known): return {'canonical': 'A4용지', 'category': '사무용품', 'confidence': 'low'}
+        r = self.m.resolve_item('머시기 종이', ['A4용지'], {}, resolver, auto='high')
+        self.assertEqual(r['status'], 'pending')           # 사람 확인 필요
+
+    def test_resolve_llm_fail_pending(self):
+        def resolver(raw, known): raise RuntimeError('llm down')
+        r = self.m.resolve_item('무엇', [], {}, resolver, auto='high')
+        self.assertEqual(r['status'], 'pending')           # 실패 시 추측 금지
+
+
 if __name__ == '__main__':
     unittest.main()
