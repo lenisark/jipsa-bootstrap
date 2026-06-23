@@ -78,5 +78,89 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(r['status'], 'pending')           # 실패 시 추측 금지
 
 
+def ev(rid, item, qty, done=True):
+    return {'record_id': rid, 'raw_item': item, 'qty': qty, 'done': done}
+
+
+def hi_resolver(canonical, category='기타'):
+    def r(raw, known): return {'canonical': canonical, 'category': category, 'confidence': 'high'}
+    return r
+
+
+class ProcessTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_baseline_marks_without_decrement(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '사무용품', '현재수량': 10,
+                            '최소수량': 2, '단위': '', '비고': ''}}
+        res = self.m.process_events([ev('R1', 'A4용지', 3)], stock, {}, {'counted': [], 'baseline_done': False},
+                                    hi_resolver('A4용지'), dry_run=False)
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 10)
+        self.assertIn('R1', res['state']['counted'])
+        self.assertTrue(res['state']['baseline_done'])
+
+    def test_decrement_after_baseline(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '사무용품', '현재수량': 10,
+                            '최소수량': 2, '단위': '', '비고': ''}}
+        res = self.m.process_events([ev('R1', 'A4용지', 3)], stock, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('A4용지'), dry_run=False)
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 7)
+        self.assertEqual(len(res['ledger']), 1)
+        self.assertEqual(res['ledger'][0]['처리후잔여'], 7)
+
+    def test_idempotent_counted(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '', '현재수량': 7,
+                            '최소수량': 2, '단위': '', '비고': ''}}
+        res = self.m.process_events([ev('R1', 'A4용지', 3)], stock, {}, {'counted': ['R1'], 'baseline_done': True},
+                                    hi_resolver('A4용지'), dry_run=False)
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 7)
+
+    def test_not_done_skipped(self):
+        res = self.m.process_events([ev('R1', 'A4용지', 3, done=False)], {}, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('A4용지'), dry_run=False)
+        self.assertEqual(res['ledger'], [])
+        self.assertNotIn('R1', res['state']['counted'])
+
+    def test_new_item_created_and_alert(self):
+        res = self.m.process_events([ev('R1', '새품목', 2)], {}, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('새품목', '기타'), dry_run=False)
+        self.assertIn('새품목', res['stock'])
+        self.assertEqual(res['stock']['새품목']['현재수량'], -2)
+        self.assertTrue(any('새품목' in a and ('신규' in a or '재고' in a) for a in res['alerts']))
+
+    def test_low_stock_alert(self):
+        stock = {'볼펜': {'품목': '볼펜', '카테고리': '사무용품', '현재수량': 3,
+                          '최소수량': 5, '단위': '', '비고': ''}}
+        res = self.m.process_events([ev('R1', '볼펜', 1)], stock, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('볼펜'), dry_run=False)
+        self.assertEqual(res['stock']['볼펜']['현재수량'], 2)
+        self.assertTrue(any('저재고' in a for a in res['alerts']))
+
+    def test_qty_zero_skipped_with_alert(self):
+        res = self.m.process_events([ev('R1', 'A4용지', 0)], {}, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('A4용지'), dry_run=False)
+        self.assertEqual(res['ledger'], [])
+        self.assertTrue(any('수량' in a for a in res['alerts']))
+
+    def test_dry_run_no_state_change(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '', '현재수량': 10,
+                            '최소수량': 2, '단위': '', '비고': ''}}
+        res = self.m.process_events([ev('R1', 'A4용지', 3)], stock, {}, {'counted': [], 'baseline_done': True},
+                                    hi_resolver('A4용지'), dry_run=True)
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 10)
+        self.assertNotIn('R1', res['state']['counted'])
+        self.assertTrue(any('A4용지' in a for a in res['alerts']))
+
+    def test_pending_when_unresolved(self):
+        def low(raw, known): return {'canonical': '', 'category': '', 'confidence': 'low'}
+        res = self.m.process_events([ev('R1', '애매품목', 2)], {}, {}, {'counted': [], 'baseline_done': True},
+                                    low, dry_run=False)
+        self.assertEqual(len(res['pending']), 1)
+        self.assertEqual(res['ledger'], [])
+        self.assertNotIn('R1', res['state']['counted'])
+
+
 if __name__ == '__main__':
     unittest.main()
