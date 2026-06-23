@@ -55,6 +55,12 @@ try:
 except Exception:
     tsk = None
 
+# 비품관리(jipsa supply). 설정 없으면 비활성.
+try:
+    import supply as sply
+except Exception:
+    sply = None
+
 SECRETS = Path.home() / '.claude/secrets/slack-jipsa.env'
 SESSIONS_DIR = Path.home() / '.claude/scripts/slack-jipsa/sessions'
 LOGS_DIR = Path.home() / '.claude/scripts/slack-jipsa/logs'
@@ -1250,6 +1256,55 @@ def _handle_pin(channel: str, ts: str, user: str) -> None:
     log(f'pin saved ts={ts} -> {wiki}')
 
 
+SUPPLY_CONFIG_FILE = Path.home() / '.claude/scripts/slack-jipsa/supply.json'
+
+
+def _load_supply_cfg() -> dict | None:
+    if not SUPPLY_CONFIG_FILE.exists():
+        return None
+    try:
+        return json.loads(SUPPLY_CONFIG_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f'supply.json 파싱 실패: {e}')
+        return None
+
+
+def _supply_poll_loop() -> None:
+    if sply is None:
+        return
+    cfg = _load_supply_cfg()
+    if not cfg:
+        log('supply.json 없음 — 비품관리 비활성')
+        return
+    notify = cfg.get('notify_channel', '')
+    dry = bool(cfg.get('dry_run', True))   # 기본 dry-run(안전)
+
+    def post(msg: str) -> None:
+        if notify:
+            try:
+                web.chat_postMessage(channel=notify, text=msg, mrkdwn=True)
+            except Exception as e:
+                log(f'  supply post fail: {e}')
+
+    def run_claude_for_match(prompt: str) -> str:
+        notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+                   'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
+        try:
+            r = _run_claude(prompt, str(uuid.uuid4()), True, 120, 'sonnet',
+                            cfg.get('cwd'), [], notools)
+            return r.stdout or '' if r.returncode == 0 else ''
+        except Exception:
+            return ''
+
+    log(f'비품관리 폴링 시작 (every {cfg.get("poll_min",5)}분, dry_run={dry})')
+    while True:
+        try:
+            sply.sync_once(web, cfg, run_claude_for_match, post, dry_run=dry)
+        except Exception as e:
+            log(f'  supply sync err: {e}')
+        time.sleep(max(60, int(cfg.get('poll_min', 5)) * 60))
+
+
 def _gate_sweeper() -> None:
     """주기적으로 만료된 승인 요청을 정리하고 막힌 task 요청자에게 알림."""
     if tsk is None:
@@ -1291,6 +1346,8 @@ def main() -> None:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
     # 승인 게이트 만료 sweeper (jipsa 2.0)
     threading.Thread(target=_gate_sweeper, daemon=True).start()
+    # 비품관리 폴링 (supply.json 있을 때만 활성)
+    threading.Thread(target=_supply_poll_loop, daemon=True).start()
     # 무한 대기
     while True:
         time.sleep(60)
