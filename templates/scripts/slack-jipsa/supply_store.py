@@ -131,6 +131,29 @@ def write_aliases(path: Path, aliases: dict) -> None:
     _atomic_save(wb, path)
 
 
+def read_aliases_full(path: Path) -> dict:
+    """별칭 시트 → {원문품목: {canonical,출처,확신도,결정방식,결정시각}} (메타 포함)."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    if ALIAS_SHEET not in wb.sheetnames:
+        wb.close()
+        return {}
+    ws = wb[ALIAS_SHEET]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    out = {}
+    for r in rows[1:]:
+        if r and r[0] and r[1]:
+            out[str(r[0])] = {'canonical': str(r[1]),
+                              '출처': r[2] if len(r) > 2 and r[2] else '',
+                              '확신도': r[3] if len(r) > 3 and r[3] else '',
+                              '결정방식': r[4] if len(r) > 4 and r[4] else '',
+                              '결정시각': r[5] if len(r) > 5 and r[5] else ''}
+    return out
+
+
 def read_ledger(path: Path) -> list[dict]:
     path = Path(path)
     if not path.exists():

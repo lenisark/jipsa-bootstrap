@@ -47,6 +47,16 @@ class StockIOTest(unittest.TestCase):
         amap = self.m.read_aliases(self.stock)
         self.assertEqual(amap['복사용지 a4'], 'A4용지')   # 조회맵은 원문→canonical
 
+    def test_alias_full_preserves_metadata(self):
+        self.m.write_stock(self.stock, {})
+        self.m.write_aliases(self.stock, {
+            '복사용지 a4': {'canonical': 'A4용지', '출처': 'list',
+                          '확신도': 'high', '결정방식': 'auto', '결정시각': '2026-06-23'}})
+        full = self.m.read_aliases_full(self.stock)
+        self.assertEqual(full['복사용지 a4']['canonical'], 'A4용지')
+        self.assertEqual(full['복사용지 a4']['출처'], 'list')
+        self.assertEqual(full['복사용지 a4']['확신도'], 'high')
+
     def test_ledger_append(self):
         ledger = self.dir / '비품_입출고이력.xlsx'
         self.m.append_ledger(ledger, [

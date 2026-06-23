@@ -219,14 +219,14 @@ def sync_once(web, cfg: dict, run_claude, post, dry_run: bool = False) -> dict:
         return res
 
     if res.get('alias_adds'):
-        merged = store.read_aliases(stock_path)
-        full = {k: {'canonical': v} for k, v in merged.items()}
+        full = store.read_aliases_full(stock_path)   # 기존 메타 보존
         full.update(res['alias_adds'])
         store.write_aliases(stock_path, full)
     if res['ledger'] or res['stock'] != stock:
         store.write_stock(stock_path, res['stock'])
     if res['ledger']:
         store.append_ledger(ledger_path, res['ledger'])
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(res['state'], ensure_ascii=False, indent=2),
                           encoding='utf-8')
     return res
