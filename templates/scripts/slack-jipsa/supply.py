@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 
 def _field(rec: dict, column_id: str) -> dict | None:
@@ -146,3 +148,85 @@ def resolve_item(raw_item: str, known: list[str], aliases: dict,
                 'alias_norm': norm}
     return {'status': 'pending', 'canonical': canonical, 'category': sug.get('category', ''),
             'confidence': confidence, 'alias_norm': norm}
+
+
+def fetch_list_records(web, list_id: str) -> list[dict]:
+    """slackLists.items.list 전체 레코드(커서 페이징)."""
+    items, cursor = [], None
+    while True:
+        params = {'list_id': list_id, 'limit': 100}
+        if cursor:
+            params['cursor'] = cursor
+        r = web.api_call('slackLists.items.list', params=params).data
+        if not r.get('ok'):
+            break
+        items.extend(r.get('items', []))
+        cursor = (r.get('response_metadata') or {}).get('next_cursor')
+        if not cursor:
+            break
+    return items
+
+
+def make_llm_resolver(run_claude):
+    """run_claude(prompt)->str(JSON) 를 받아 resolver(raw,known)->dict 생성."""
+    def resolver(raw_norm: str, known: list[str]) -> dict:
+        prompt = (
+            "너는 사무비품 품목명을 표준 품목으로 매칭하는 분류기다. "
+            "아래 '신규 품목명'이 '기존 품목 목록' 중 하나와 같은 물건이면 그 이름을, "
+            "아니면 새 표준명을 제안하라. 반드시 JSON만 출력: "
+            '{"canonical":"표준품목명","category":"사무용품|다과·음료|청소·위생|IT·전자|비품·가구|기타",'
+            '"confidence":"high|low"}. 확실할 때만 high.\n\n'
+            f"기존 품목 목록: {known}\n신규 품목명: {raw_norm}")
+        txt = (run_claude(prompt) or '').strip()
+        m = re.search(r'\{.*\}', txt, re.S)
+        return json.loads(m.group(0)) if m else {}
+    return resolver
+
+
+def sync_once(web, cfg: dict, run_claude, post, dry_run: bool = False) -> dict:
+    """1회 동기화: 리스트 읽기→파싱→process_events→xlsx/state 반영→알림."""
+    import supply_store as store          # 지연 import (순수코어 테스트 로딩 보호)
+    folder = Path(cfg['folder'])
+    stock_path = folder / cfg['stock_xlsx']
+    ledger_path = folder / cfg['ledger_xlsx']
+    state_path = Path.home() / '.claude/scripts/slack-jipsa/supply_state.json'
+
+    if not dry_run and (store.is_locked(stock_path) or store.is_locked(ledger_path)):
+        post('⚠️ 비품 엑셀이 열려 있어 이번 동기화를 건너뜁니다(다음 주기 재시도).')
+        return {'skipped': 'locked'}
+
+    state = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding='utf-8'))
+        except Exception:
+            state = {}
+    state.setdefault('counted', [])
+    state.setdefault('baseline_done', False)
+
+    stock = store.read_stock(stock_path)
+    aliases = store.read_aliases(stock_path)
+    records = fetch_list_records(web, cfg['list_id'])
+    events = [parse_record(r, cfg['cols'], cfg['status_done_option']) for r in records]
+    resolver = make_llm_resolver(run_claude)
+    res = process_events(events, stock, aliases, state, resolver,
+                         dry_run=dry_run, default_min=cfg.get('default_min_qty', 1),
+                         auto=cfg.get('match_confidence_auto', 'high'))
+
+    for a in res['alerts']:
+        post(a)
+    if dry_run:
+        return res
+
+    if res.get('alias_adds'):
+        merged = store.read_aliases(stock_path)
+        full = {k: {'canonical': v} for k, v in merged.items()}
+        full.update(res['alias_adds'])
+        store.write_aliases(stock_path, full)
+    if res['ledger'] or res['stock'] != stock:
+        store.write_stock(stock_path, res['stock'])
+    if res['ledger']:
+        store.append_ledger(ledger_path, res['ledger'])
+    state_path.write_text(json.dumps(res['state'], ensure_ascii=False, indent=2),
+                          encoding='utf-8')
+    return res
