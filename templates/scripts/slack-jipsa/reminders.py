@@ -68,8 +68,8 @@ def _run_action(web, r: dict) -> None:
         out = None
     try:
         if out:
-            web.chat_postMessage(channel=ch, mrkdwn=True,
-                                 text=f"🤖 *자동 작업: {label}*\n\n{out}")
+            # 지시문 echo 없이 결과(요약)만 게시. (결과 자체에 제목이 들어있음)
+            web.chat_postMessage(channel=ch, mrkdwn=True, text=out)
         else:
             web.chat_postMessage(channel=ch, mrkdwn=True,
                                  text=f"🤖 자동 작업을 끝내지 못했어요: {label}")
