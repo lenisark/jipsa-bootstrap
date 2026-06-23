@@ -162,5 +162,48 @@ class ProcessTest(unittest.TestCase):
         self.assertNotIn('R1', res['state']['counted'])
 
 
+class InboundTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def test_parse_pipe_table(self):
+        txt = ("no | 품명 | 수량 | 금액 | 출금계좌 | 부서\n"
+               "1 | 디퓨저 리필액, 6개 | 1 | 30,480 | 대구은행 379-1 | 전부서\n"
+               "12 | 차량용 방향제 | 17 | 423,300 | 대구은행 379-1 | 매입부")
+        rows = self.m.parse_purchase_table(txt)
+        self.assertEqual(len(rows), 2)                 # 헤더 제외
+        self.assertEqual(rows[0]['품명'], '디퓨저 리필액, 6개')
+        self.assertEqual(rows[0]['수량'], 1)            # 금액(30480) 아님
+        self.assertEqual(rows[1]['수량'], 17)
+        self.assertEqual(rows[1]['부서'], '매입부')
+
+    def test_parse_tab_table_no_header(self):
+        txt = "딱풀\t4\t8000\n클립\t2\t3000"
+        rows = self.m.parse_purchase_table(txt)
+        self.assertEqual([(r['품명'], r['수량']) for r in rows], [('딱풀', 4), ('클립', 2)])
+
+    def test_process_inbound_adds(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '사무용품', '현재수량': 5,
+                            '최소수량': 0, '단위': '', '비고': ''}}
+        rows = [{'품명': 'A4', '수량': 3, '부서': '전부서'}]
+        res = self.m.process_inbound(rows, stock, {'a4': 'A4용지'}, hi_resolver('A4용지'))
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 8)   # 5+3
+        self.assertEqual(res['ledger'][0]['유형'], '입고')
+        self.assertFalse(res['stock'] is stock)                   # 원본 미변경
+
+    def test_process_inbound_new_item(self):
+        res = self.m.process_inbound([{'품명': '클립', '수량': 2, '부서': ''}], {}, {},
+                                     hi_resolver('클립', '사무용품'))
+        self.assertEqual(res['stock']['클립']['현재수량'], 2)
+        self.assertTrue(any('신규' in a for a in res['alerts']))
+
+    def test_process_inbound_pending_not_added(self):
+        def low(raw, known): return {'canonical': '', 'category': '', 'confidence': 'low'}
+        res = self.m.process_inbound([{'품명': '머시기', '수량': 9, '부서': ''}], {}, {}, low)
+        self.assertEqual(res['stock'], {})
+        self.assertEqual(len(res['pending']), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -682,6 +682,107 @@ def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
     return True
 
 
+# ── 비품관리 슬랙 명령 (jipsa 2.0 P2) ──────────────────────────────
+def _supply_match_claude(prompt: str, cfg: dict) -> str:
+    """품목 매칭용 1회성 claude 호출(새 세션, 도구 없음)."""
+    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+               'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
+    try:
+        r = _run_claude(prompt, str(uuid.uuid4()), True, 120, 'sonnet',
+                        cfg.get('cwd'), [], notools)
+        return r.stdout or '' if r.returncode == 0 else ''
+    except Exception:
+        return ''
+
+
+def handle_supply_command(channel: str, user: str, text: str) -> bool:
+    """비품 명령: 재고 / 재고 <품목> / 비품현황 / 입고 <품목> <수량> / 입고등록 <표>.
+    조회는 누구나, 입고(쓰기)는 담당자(managers + 소유자)만. 처리했으면 True."""
+    if sply is None:
+        return False
+    cfg = _load_supply_cfg()
+    if not cfg:
+        return False
+    t = text.strip()
+    first = t.split('\n', 1)[0].strip()
+    managers = set(cfg.get('managers', [])) | ({MIRI} if MIRI else set())
+
+    def deny():
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='입고 등록은 담당자만 할 수 있어요.')
+        except Exception:
+            pass
+        return True
+
+    # 비품현황 / 재고 전체
+    if first in ('비품현황', '재고현황', '재고'):
+        inv = sply.read_inventory(cfg)
+        if not inv:
+            web.chat_postMessage(channel=channel, text='등록된 비품 재고가 없어요.')
+            return True
+        low = [r for r in inv.values() if int(r['현재수량']) < int(r.get('최소수량', 0) or 0)]
+        lines = [f'📦 *비품 현황* (품목 {len(inv)}종)']
+        for r in sorted(inv.values(), key=lambda x: x['품목'])[:40]:
+            mark = ' ⚠️' if int(r['현재수량']) < int(r.get('최소수량', 0) or 0) else ''
+            lines.append(f"• {r['품목']}: *{r['현재수량']}*{(' '+r['단위']) if r.get('단위') else ''}{mark}")
+        if low:
+            lines.append('\n⚠️ 저재고: ' + ', '.join(r['품목'] for r in low))
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+
+    # 재고 <품목>
+    m = re.match(r'^재고\s+(.+)$', first)
+    if m:
+        q = m.group(1).strip()
+        inv = sply.read_inventory(cfg)
+        hits = [r for k, r in inv.items() if q.lower() in k.lower()]
+        if hits:
+            lines = ['📦 *재고 조회*'] + [
+                f"• {r['품목']}: *{r['현재수량']}*{(' '+r['단위']) if r.get('단위') else ''} "
+                f"(최소 {r.get('최소수량', 0)})" for r in hits[:15]]
+            web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        else:
+            web.chat_postMessage(channel=channel, text=f"'{q}' 품목을 재고표에서 못 찾았어요.")
+        return True
+
+    # 입고 <품목> <수량>  (단건, 담당자만)
+    m = re.match(r'^입고\s+(.+?)\s+(\d+)$', first)
+    if m:
+        if user not in managers:
+            return deny()
+        rows = [{'품명': m.group(1).strip(), '수량': int(m.group(2)), '부서': ''}]
+        res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+        _supply_reply(channel, res)
+        return True
+
+    # 입고등록 + 표 붙여넣기 (담당자만)
+    if first in ('입고등록', '입고 등록'):
+        if user not in managers:
+            return deny()
+        body = t.split('\n', 1)[1] if '\n' in t else ''
+        rows = sply.parse_purchase_table(body)
+        if not rows:
+            web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+                "표를 못 읽었어요. `입고등록` 다음 줄부터 표를 붙여넣어 주세요.\n"
+                "예) `품명 [탭] 수량 [탭] 금액 …` 또는 `품명 | 수량 | 금액 …`"))
+            return True
+        res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+        _supply_reply(channel, res, header=f'입고등록 {len(rows)}행 처리')
+        return True
+
+    return False
+
+
+def _supply_reply(channel: str, res: dict, header: str = '') -> None:
+    if res.get('error') == 'locked':
+        web.chat_postMessage(channel=channel,
+                             text='⚠️ 비품 엑셀이 열려 있어요. 닫고 다시 시도해 주세요.')
+        return
+    lines = ([f'*{header}*'] if header else []) + (res.get('alerts') or ['처리할 내용이 없어요.'])
+    web.chat_postMessage(channel=channel, text='\n'.join(lines[:40]), mrkdwn=True)
+
+
 # ── 도움말 ─────────────────────────────────────────────────────────
 def handle_help(channel: str) -> None:
     p = '@집사 ' if CHANNELS.get(channel, {}).get('require_mention') else ''
@@ -901,6 +1002,13 @@ def handle_message(event: dict) -> None:
             return
     except Exception as e:
         log(f'  output dir cmd err: {e}')
+
+    # 비품관리 명령 (재고/비품현황/입고/입고등록). 처리되면 claude 호출 skip.
+    try:
+        if handle_supply_command(channel, user, text):
+            return
+    except Exception as e:
+        log(f'  supply cmd err: {e}')
 
     # 작업 객체 명령 (tasks_enabled 채널만). 처리되면 claude 호출 skip.
     try:

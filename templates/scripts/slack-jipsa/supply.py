@@ -230,3 +230,117 @@ def sync_once(web, cfg: dict, run_claude, post, dry_run: bool = False) -> dict:
     state_path.write_text(json.dumps(res['state'], ensure_ascii=False, indent=2),
                           encoding='utf-8')
     return res
+
+
+# ── 입고 (P2): 구매표 붙여넣기 → 재고 가산 ───────────────────────────
+def parse_purchase_table(text: str) -> list[dict]:
+    """붙여넣은 구매표 텍스트 → [{품명, 수량, 부서}]. 탭/파이프/2+공백 구분.
+
+    형식 예: `no  품명  수량  금액  계좌  출금계좌  부서` (앞 no는 선택).
+    품명 뒤 첫 정수 토큰 = 수량(금액보다 앞에 옴). 못 읽는 줄은 건너뛴다.
+    """
+    rows = []
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if '\t' in line:
+            parts = [p.strip() for p in line.split('\t')]
+        elif '|' in line:
+            parts = [p.strip() for p in line.split('|')]
+        else:
+            parts = [p for p in re.split(r'\s{2,}', line) if p.strip()]
+        parts = [p for p in parts if p != '']
+        if len(parts) < 2:
+            continue
+        if re.fullmatch(r'\d+', parts[0]):     # 앞 'no' 컬럼 제거
+            parts = parts[1:]
+        if len(parts) < 2:
+            continue
+        if '품명' in parts[0] or '수량' in parts[0]:   # 헤더 행 skip
+            continue
+        name = parts[0]
+        qty = None
+        for tok in parts[1:]:                  # 품명 뒤 첫 정수 = 수량
+            t = tok.replace(',', '').strip()
+            if re.fullmatch(r'\d+', t):
+                qty = int(t)
+                break
+        if not name or qty is None:
+            continue
+        dept = parts[-1] if len(parts) >= 3 and not re.fullmatch(r'[\d,]+', parts[-1]) else ''
+        rows.append({'품명': name, '수량': qty, '부서': dept})
+    return rows
+
+
+def process_inbound(rows: list[dict], stock: dict, aliases: dict, resolver,
+                    default_min: int = 1, auto: str = 'high') -> dict:
+    """입고 행들 → 재고 가산(결정적). 순수: 원본 미변경, 변경분 반환.
+
+    반환: {stock, ledger, aliases, alerts, pending, alias_adds}
+    pending(애매)·수량0은 가산 안 함.
+    """
+    import copy
+    work = copy.deepcopy(stock)
+    aliases_w = dict(aliases)
+    ledger, alerts, pending, alias_adds = [], [], [], {}
+    for r in rows:
+        raw = (r.get('품명') or '').strip()
+        qty = int(r.get('수량') or 0)
+        dept = r.get('부서', '')
+        if not raw or qty <= 0:
+            alerts.append(f'⚠️ 건너뜀(품명/수량 확인): "{raw}" x {r.get("수량")}')
+            continue
+        res = resolve_item(raw, sorted(work.keys()), aliases_w, resolver, auto=auto)
+        if res['status'] == 'pending':
+            pending.append({'raw_item': raw, 'qty': qty, 'suggest': res.get('canonical', '')})
+            alerts.append(f'❓ 품목 확인 필요(입고 보류): "{raw}" → 제안 "{res.get("canonical") or "?"}"')
+            continue
+        canon = res['canonical']
+        if res.get('confidence') != 'cached' and res['alias_norm'] not in aliases_w:
+            aliases_w[res['alias_norm']] = canon
+            alias_adds[res['alias_norm']] = {'canonical': canon, '출처': 'order',
+                '확신도': res.get('confidence', ''), '결정방식': 'auto', '결정시각': _now_kst()}
+        row = work.get(canon)
+        if row is None:
+            row = {'품목': canon, '카테고리': res.get('category', ''), '현재수량': 0,
+                   '최소수량': default_min, '단위': '', '비고': ''}
+            work[canon] = row
+            alerts.append(f'🆕 신규 품목 "{canon}" 추가')
+        after = int(row['현재수량']) + qty
+        row['현재수량'] = after
+        ledger.append({'일시': _now_kst(), '유형': '입고', 'canonical품목': canon,
+                       '원문품목': raw, '수량': qty, '처리후잔여': after,
+                       '신청자/발주처': dept, '출처키': 'manual'})
+        alerts.append(f'📥 {canon} +{qty} 입고 — 현재 {after}')
+    return {'stock': work, 'ledger': ledger, 'aliases': aliases_w,
+            'alerts': alerts, 'pending': pending, 'alias_adds': alias_adds}
+
+
+def read_inventory(cfg: dict) -> dict:
+    """재고 현황 {품목: row} 읽기(조회용)."""
+    import supply_store as store
+    return store.read_stock(Path(cfg['folder']) / cfg['stock_xlsx'])
+
+
+def apply_inbound(cfg: dict, rows: list[dict], run_claude) -> dict:
+    """입고 행들을 재고 xlsx에 반영(가산)하고 결과 반환. 엑셀 열림이면 skip."""
+    import supply_store as store
+    folder = Path(cfg['folder'])
+    stock_path = folder / cfg['stock_xlsx']
+    ledger_path = folder / cfg['ledger_xlsx']
+    if store.is_locked(stock_path) or store.is_locked(ledger_path):
+        return {'error': 'locked'}
+    stock = store.read_stock(stock_path)
+    aliases = store.read_aliases(stock_path)
+    res = process_inbound(rows, stock, aliases, make_llm_resolver(run_claude),
+                          default_min=cfg.get('default_min_qty', 1),
+                          auto=cfg.get('match_confidence_auto', 'high'))
+    if res.get('alias_adds'):
+        full = store.read_aliases_full(stock_path)
+        full.update(res['alias_adds'])
+        store.write_aliases(stock_path, full)
+    if res['ledger']:
+        store.write_stock(stock_path, res['stock'])
+        store.append_ledger(ledger_path, res['ledger'])
+    return res
