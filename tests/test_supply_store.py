@@ -39,6 +39,29 @@ class StockIOTest(unittest.TestCase):
         unlocked.touch()
         self.assertFalse(self.m.is_locked(unlocked))
 
+    def test_alias_roundtrip(self):
+        self.m.write_stock(self.stock, {})           # 파일 생성(재고 시트)
+        self.m.write_aliases(self.stock, {
+            '복사용지 a4': {'canonical': 'A4용지', '출처': 'list',
+                          '확신도': 'high', '결정방식': 'auto', '결정시각': '2026-06-23'}})
+        amap = self.m.read_aliases(self.stock)
+        self.assertEqual(amap['복사용지 a4'], 'A4용지')   # 조회맵은 원문→canonical
+
+    def test_ledger_append(self):
+        ledger = self.dir / '비품_입출고이력.xlsx'
+        self.m.append_ledger(ledger, [
+            {'일시': '2026-06-23 10:00', '유형': '출고', 'canonical품목': 'A4용지',
+             '원문품목': '복사용지 A4', '수량': 3, '처리후잔여': 2,
+             '신청자/발주처': '홍길동', '출처키': 'Rec1'}])
+        self.m.append_ledger(ledger, [
+            {'일시': '2026-06-23 11:00', '유형': '입고', 'canonical품목': 'A4용지',
+             '원문품목': 'A4용지', '수량': 10, '처리후잔여': 12,
+             '신청자/발주처': '쿠팡', '출처키': 'batch1#1'}])
+        rows = self.m.read_ledger(ledger)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['유형'], '출고')
+        self.assertEqual(rows[1]['수량'], 10)
+
 
 if __name__ == '__main__':
     unittest.main()

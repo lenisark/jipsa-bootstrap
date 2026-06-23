@@ -92,3 +92,69 @@ def write_stock(path: Path, rows: dict) -> None:
         d = rows[item]
         ws.append([d.get(h, '') for h in STOCK_HEADERS])
     _atomic_save(wb, path)
+
+
+def read_aliases(path: Path) -> dict:
+    """별칭 시트 → {원문품목: canonical품목}. 파일/시트 없으면 {}."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    if ALIAS_SHEET not in wb.sheetnames:
+        wb.close()
+        return {}
+    ws = wb[ALIAS_SHEET]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    out = {}
+    for r in rows[1:]:
+        if r and r[0] and r[1]:
+            out[str(r[0])] = str(r[1])
+    return out
+
+
+def write_aliases(path: Path, aliases: dict) -> None:
+    """{원문: {canonical,출처,확신도,결정방식,결정시각}} 를 별칭 시트로 저장(재고 시트 보존)."""
+    path = Path(path)
+    if path.exists():
+        wb = openpyxl.load_workbook(path)
+    else:
+        wb = openpyxl.Workbook(); wb.active.title = STOCK_SHEET; wb.active.append(STOCK_HEADERS)
+    if ALIAS_SHEET in wb.sheetnames:
+        del wb[ALIAS_SHEET]
+    ws = wb.create_sheet(ALIAS_SHEET)
+    ws.append(ALIAS_HEADERS)
+    for raw in sorted(aliases):
+        a = aliases[raw]
+        ws.append([raw, a.get('canonical', ''), a.get('출처', ''),
+                   a.get('확신도', ''), a.get('결정방식', ''), a.get('결정시각', '')])
+    _atomic_save(wb, path)
+
+
+def read_ledger(path: Path) -> list[dict]:
+    path = Path(path)
+    if not path.exists():
+        return []
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    out = []
+    for r in rows[1:]:
+        if not r or all(c is None for c in r):
+            continue
+        out.append({h: (r[i] if i < len(r) else None) for i, h in enumerate(LEDGER_HEADERS)})
+    return out
+
+
+def append_ledger(path: Path, entries: list[dict]) -> None:
+    """이력 행들을 append(원자적). 파일 없으면 헤더 생성."""
+    path = Path(path)
+    if path.exists():
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+    else:
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = '이력'; ws.append(LEDGER_HEADERS)
+    for e in entries:
+        ws.append([e.get(h, '') for h in LEDGER_HEADERS])
+    _atomic_save(wb, path)
