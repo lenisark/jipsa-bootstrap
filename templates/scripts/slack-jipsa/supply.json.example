@@ -1,0 +1,18 @@
+{
+  "list_id": "F0AGQLRGQKC",
+  "poll_min": 5,
+  "dry_run": true,
+  "notify_channel": "C0AGPKSSR8A",
+  "cwd": "~/.claude/scripts/slack-team",
+  "folder": "G:/공유 드라이브/인사총무팀_일반/05_총무 영역/비품·고정비",
+  "stock_xlsx": "비품재고_현황.xlsx",
+  "ledger_xlsx": "비품_입출고이력.xlsx",
+  "cols": { "item": "Col0AG9D5TQTZ", "qty": "Col0AGUEUTS7N",
+            "status": "Col0AGJF67S83", "dept": "Col0AGU94KCHJ",
+            "amount": "Col0AGUEZ0XQC", "requester": "Col0AGMED767P" },
+  "status_done_option": "OptXGCU61KL",
+  "categories": ["사무용품", "다과·음료", "청소·위생", "IT·전자", "비품·가구", "기타"],
+  "managers": ["U0ANN3GJRDE"],
+  "default_min_qty": 1,
+  "match_confidence_auto": "high"
+}

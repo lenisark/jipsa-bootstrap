@@ -22,6 +22,7 @@
 | **8. 작업 객체** (2.0) | 휘발성 대화를 상태 가진 task로 승격(대기/진행/막힘/완료). 데몬 재시작에도 복구 | 선택 |
 | **9. 승인 게이트** (2.0) | 개인 채널 민감 도구 직전 슬랙 `[승인][거부]` 후 대기(block) + 부서 채널 권한상승 승인요청(escalate). 폰으로 원격 승인 | 선택 |
 | **10. 알리미 2.0** (2.0) | cron에 맞춰 집사가 직접 일하고 결과 보고 (예: 매일 어제 FAQ 요약 게시) | 선택 |
+| **11. 비품관리 (2.0)** | 슬랙 비품신청 리스트 수령완료 → 구글드라이브 재고 .xlsx 자동 차감 + 저재고 알림 | 선택 |
 
 ### 부서 집사 기능
 
@@ -60,7 +61,7 @@ Claude가 자동으로 OS 확인 → 깔 모듈 선택 → 슬랙 앱/토큰 안
 |------|------|------|
 | **Claude Code 구독** | $$ | 전체 |
 | **슬랙 워크스페이스** | 무료 | 채널 2개(개인·부서) |
-| **Python 3** + `slack_sdk` `holidays` | 무료 | 데몬 |
+| **Python 3** + `slack_sdk` `holidays` `openpyxl` | 무료 | 데몬 (`openpyxl`은 비품관리 모듈 11만) |
 | **OS** | — | Windows / macOS / Linux |
 
 > AI가 OS를 묻고 자동 분기합니다 (Windows=Task Scheduler+PowerShell, macOS=launchd, Linux=systemd).
@@ -106,12 +107,13 @@ jipsa-bootstrap/
 │   ├── 07-team-jipsa.md         ← 부서 집사
 │   ├── 08-task-layer.md         ← 작업 객체 (2.0)
 │   ├── 09-approval-gate.md      ← 승인 게이트 block+escalate (2.0)
-│   └── 10-active-scheduler.md   ← 알리미 2.0 능동 실행 (2.0)
+│   ├── 10-active-scheduler.md   ← 알리미 2.0 능동 실행 (2.0)
+│   └── 11-supply-inventory.md   ← 비품관리 재고 자동 차감 (2.0)
 └── templates/
     ├── lib/               ← 검증 라이브러리 (그대로 카피)
     ├── hooks/             ← Stop hook
     ├── scripts/
-    │   ├── slack-jipsa/   ← daemon.py + reminders.py + tasks.py + approval.py + pretooluse_gate.py + .claude/settings.json.tmpl + channels.json.example + CLAUDE.md
+    │   ├── slack-jipsa/   ← daemon.py + reminders.py + tasks.py + approval.py + pretooluse_gate.py + supply.py + supply_store.py + .claude/settings.json.tmpl + channels.json.example + supply.json.example + CLAUDE.md
     │   └── slack-team/    ← 부서 작업폴더 (CLAUDE.md + docs/FAQ)
     ├── run.ps1.tmpl / run.sh.tmpl
     ├── win-task-*.xml.tmpl        ← Windows Task Scheduler

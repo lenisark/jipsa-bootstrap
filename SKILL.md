@@ -32,6 +32,8 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 - `templates/scripts/slack-jipsa/tasks.py` → `~/.claude/scripts/slack-jipsa/tasks.py` **(작업 객체, 모듈 8)**
 - `templates/scripts/slack-jipsa/approval.py` → `~/.claude/scripts/slack-jipsa/approval.py` **(승인 게이트, 모듈 9)**
 - `templates/scripts/slack-jipsa/pretooluse_gate.py` → `~/.claude/scripts/slack-jipsa/pretooluse_gate.py` **(게이트 훅, 모듈 9)**
+- `templates/scripts/slack-jipsa/supply.py` → `~/.claude/scripts/slack-jipsa/supply.py` **(비품관리 폴링·차감, 모듈 11)**
+- `templates/scripts/slack-jipsa/supply_store.py` → `~/.claude/scripts/slack-jipsa/supply_store.py` **(비품관리 xlsx I/O·상태, 모듈 11)**
 - `templates/scripts/slack-jipsa/CLAUDE.md` → `~/.claude/scripts/slack-jipsa/CLAUDE.md` (개인 페르소나, 운영자 수정 OK)
 - `templates/scripts/slack-team/CLAUDE.md` → `~/.claude/scripts/slack-team/CLAUDE.md` (부서 페르소나, 운영자 수정 OK)
 - `templates/scripts/slack-team/docs/README.md` → `~/.claude/scripts/slack-team/docs/README.md`
@@ -41,6 +43,7 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 ### B. 운영자가 값을 채우는 설정/문서
 
 - `templates/scripts/slack-jipsa/channels.json.example` → 채널ID 치환 후 `channels.json`
+- `templates/scripts/slack-jipsa/supply.json.example` → 값 확인 후 `supply.json` (비품관리, 모듈 11)
 - `templates/scripts/slack-team/docs/회사-FAQ.md` → 실제 사내 규정으로 내용 교체
 
 ### C. 변수 치환 템플릿 (.tmpl)
@@ -65,7 +68,7 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
    ② 부서 공용 집사만 (Sonnet, 샌드박스, 팀 기능)
    ③ 둘 다 (멀티채널)
    + 옵션: 노션 적재 / 폴더 트리거
-   + 2.0 옵션: 작업 객체(모듈 8) / 승인 게이트(모듈 9, 개인 채널)
+   + 2.0 옵션: 작업 객체(모듈 8) / 승인 게이트(모듈 9, 개인 채널) / 비품관리(모듈 11)
 3. Claude Code · Python 설치돼 있죠? (네/아니오)
 ```
 
@@ -80,7 +83,7 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
 2. **모듈 5** (멀티채널) — `channels.json` 작성. ①②③ 모두 권장.
 3. **모듈 6/7** — 선택에 따라 개인/부서.
 4. **모듈 2/3/4** — 폴더 트리거·노션 (선택).
-5. **모듈 8/9/10 (jipsa 2.0, 선택)** — 작업 객체(8) → 승인 게이트(9, 개인 block + 부서 escalate) → 알리미 2.0 능동 실행(10). 8 먼저, 그 위에 9. 10은 모듈 7 알리미 위에 얹힘.
+5. **모듈 8/9/10/11 (jipsa 2.0, 선택)** — 작업 객체(8) → 승인 게이트(9, 개인 block + 부서 escalate) → 알리미 2.0 능동 실행(10) → 비품관리(11). 8 먼저, 그 위에 9. 10은 모듈 7 알리미 위에 얹힘. 11은 독립 모듈(모듈 1·5 위에 바로 얹힘).
 
 ## OS별 분기 로직
 
@@ -108,16 +111,17 @@ Windows/Linux 자동시작 등록은 위 .tmpl + 아래 "OS별 분기 로직" �
 ## 의존성 설치 (필수)
 
 ```
-pip install slack_sdk holidays
+pip install slack_sdk holidays openpyxl
 ```
 - `slack_sdk` — 슬랙 Socket Mode (전 모듈)
 - `holidays` — 알리미 한국 공휴일/영업일 이동 (모듈 7). 없으면 알리미만 비활성, 채팅은 동작.
+- `openpyxl` — 비품관리 재고·이력 xlsx 읽기/쓰기 (모듈 11). 없으면 비품관리만 비활성.
 
 설치 실패 시 venv 분기 → 런처(`run.ps1`/`run.sh`)의 `{PYTHON_PATH}`를 venv python으로 지정.
 
 ## 슬랙 앱 스코프 (부서 기능 포함)
 
-Bot Token Scopes: `chat:write`, `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`, `reactions:read`, `reactions:write`
+Bot Token Scopes: `chat:write`, `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`, `reactions:read`, `reactions:write`, `lists:read`(+`lists:write` 선택, 비품관리 모듈 11)
 Event Subscriptions: `message.channels`, `message.groups`, `reaction_added`
 Socket Mode: 켜기. 스코프 변경 후 **앱 재설치** 필수.
 Interactivity: 승인 게이트(모듈 9)를 쓸 때만 **Interactivity & Shortcuts** 토글 ON (Socket Mode라 URL 불필요). 버튼 클릭(block_actions) 수신용.
@@ -134,6 +138,7 @@ Interactivity: 승인 게이트(모듈 9)를 쓸 때만 **Interactivity & Shortc
 - **모듈 8 (2.0)** — `tasks.py` 카피 → `channels.json`에 `tasks_enabled: true` → 재시작 → `작업목록` 검증.
 - **모듈 9 (2.0)** — `tasks.py`·`approval.py`·`pretooluse_gate.py` 카피 → `.claude/settings.json` 배치(`__PYTHON__`·`__GATE_DIR__` 치환, 개인=slack-jipsa / 부서 escalate면 slack-team 에도) → 슬랙 Interactivity ON → `channels.json` `gate` 추가(개인 `mode` 생략=block / 부서 `mode:escalate`) → 단계적 롤아웃(`enabled:false`→테스트→`true`).
 - **모듈 10 (2.0)** — 최신 `reminders.py`·`daemon.py` 확인(`set_executor`/`run_scheduled_action` 포함) → 재시작 → `매일 9시에 어제 FAQ 요약해서 올려줘` 같은 능동 작업 등록 → 🤖 결과 게시 확인.
+- **모듈 11 (2.0)** — `supply.py`·`supply_store.py` 카피 → `supply.json.example` 복사 후 값 확인 → `pip install openpyxl` → `lists:read` 스코프 추가·앱 재설치 → `dry_run:true` 1주기 관찰 → `dry_run:false` 실가동.
 
 코드 카피 예시 (mac/linux):
 ```bash
