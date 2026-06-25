@@ -743,7 +743,7 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
         if time.time() > _inbound_wait.get(key, 0):
             _inbound_wait.pop(key, None)
         elif first not in ('입고등록', '입고 등록', '재고', '비품현황', '재고현황') \
-                and not re.match(r'^(입고|재고)\s', first):
+                and not re.match(r'^(입고|재고|출고|실사)\s', first):
             _inbound_wait.pop(key, None)
             return _do_inbound_register(channel, t, cfg)
 
@@ -786,13 +786,23 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
             web.chat_postMessage(channel=channel, text=f"'{q}' 품목을 재고표에서 못 찾았어요.")
         return True
 
-    # 입고 <품목> <수량>  (단건, 담당자만)
+    # 입고 <품목> <수량>  (단건, 담당자만 — 팩 표기 있으면 곱셈)
     m = re.match(r'^입고\s+(.+?)\s+(\d+)$', first)
     if m:
         if user not in managers:
             return deny()
         rows = [{'품명': m.group(1).strip(), '수량': int(m.group(2)), '부서': ''}]
         res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+        _supply_reply(channel, res)
+        return True
+
+    # 출고 <품목> <수량> (차감) / 실사 <품목> <수량> (현재고를 그 값으로 설정). 담당자만.
+    m = re.match(r'^(출고|실사)\s+(.+?)\s+(\d+)$', first)
+    if m:
+        if user not in managers:
+            return deny()
+        mode, item, qty = m.group(1), m.group(2).strip(), int(m.group(3))
+        res = sply.apply_adjust(cfg, item, qty, mode, lambda p: _supply_match_claude(p, cfg))
         _supply_reply(channel, res)
         return True
 

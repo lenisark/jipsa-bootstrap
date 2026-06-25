@@ -233,6 +233,26 @@ class InboundTest(unittest.TestCase):
         self.assertEqual(res['ledger'][0]['수량'], 5000)
         self.assertEqual(res['stock']['16온스 종이컵']['단위'], '개')
 
+    def test_adjust_outbound_decrements(self):
+        stock = {'물티슈': {'품목': '물티슈', '카테고리': '청소·위생', '현재수량': 10,
+                           '최소수량': 3, '단위': '', '비고': ''}}
+        res = self.m.process_adjust('물티슈', 4, '출고', stock, {'물티슈': '물티슈'}, hi_resolver('물티슈'))
+        self.assertEqual(res['stock']['물티슈']['현재수량'], 6)
+        self.assertEqual(res['ledger'][0]['유형'], '출고')
+
+    def test_adjust_stocktake_sets_absolute(self):
+        stock = {'A4용지': {'품목': 'A4용지', '카테고리': '사무용품', '현재수량': 99,
+                           '최소수량': 5, '단위': '', '비고': ''}}
+        res = self.m.process_adjust('A4용지', 3, '실사', stock, {'a4용지': 'A4용지'}, hi_resolver('A4용지'))
+        self.assertEqual(res['stock']['A4용지']['현재수량'], 3)        # 절대값 설정
+        self.assertEqual(res['ledger'][0]['유형'], '실사')
+        self.assertTrue(any('저재고' in a for a in res['alerts']))     # 3 < 5
+
+    def test_adjust_outbound_below_zero_warns(self):
+        res = self.m.process_adjust('없는것', 2, '출고', {}, {}, hi_resolver('없는것'))
+        self.assertEqual(res['stock']['없는것']['현재수량'], -2)
+        self.assertTrue(any('신규' in a for a in res['alerts']))
+
     def test_inbound_distinct_specs_not_merged(self):
         # resolver가 입력명을 그대로 canonical로 → 16온스 vs 180ml 분리 유지
         def keep(raw, known): return {'canonical': raw, 'category': '다과·음료', 'confidence': 'high'}

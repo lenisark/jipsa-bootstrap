@@ -415,3 +415,68 @@ def apply_inbound(cfg: dict, rows: list[dict], run_claude) -> dict:
         store.write_stock(stock_path, res['stock'])
         store.append_ledger(ledger_path, res['ledger'])
     return res
+
+
+def process_adjust(raw_item: str, qty: int, mode: str, stock: dict, aliases: dict,
+                   resolver, default_min: int = 1, auto: str = 'high') -> dict:
+    """단건 수동 조정(순수). mode: '출고'(차감) | '실사'(현재고를 qty로 설정) | '입고'(가산).
+    비치형 비품 소진 처리용. 원본 미변경, 변경분 반환."""
+    import copy
+    work = copy.deepcopy(stock)
+    aliases_w = dict(aliases)
+    alerts, ledger, pending, alias_adds = [], [], [], {}
+    res = resolve_item(raw_item, sorted(work.keys()), aliases_w, resolver, auto=auto)
+    if res['status'] == 'pending':
+        return {'stock': work, 'ledger': [], 'aliases': aliases_w,
+                'alerts': [f'❓ 품목 확인 필요: "{raw_item}" → [별칭] 시트에 등록 후 다시 시도'],
+                'pending': [{'raw_item': raw_item, 'qty': qty}], 'alias_adds': {}}
+    canon = res['canonical']
+    if res.get('confidence') != 'cached' and res['alias_norm'] not in aliases_w:
+        aliases_w[res['alias_norm']] = canon
+        alias_adds[res['alias_norm']] = {'canonical': canon, '출처': 'manual',
+            '확신도': res.get('confidence', ''), '결정방식': 'auto', '결정시각': _now_kst()}
+    row = work.get(canon)
+    if row is None:
+        row = {'품목': canon, '카테고리': res.get('category', ''), '현재수량': 0,
+               '최소수량': default_min, '단위': '', '비고': ''}
+        work[canon] = row
+        alerts.append(f'🆕 신규 품목 "{canon}" 추가')
+    cur = int(row['현재수량'])
+    after = qty if mode == '실사' else (cur - qty if mode == '출고' else cur + qty)
+    row['현재수량'] = after
+    ledger.append({'일시': _now_kst(), '유형': mode, 'canonical품목': canon,
+                   '원문품목': raw_item, '수량': qty, '처리후잔여': after,
+                   '신청자/발주처': '', '출처키': 'manual'})
+    icon = {'실사': '📋', '출고': '📤', '입고': '📥'}.get(mode, '•')
+    if mode == '실사':
+        alerts.append(f'{icon} {canon} 실사 완료 — 현재 {after} (이전 {cur})')
+    else:
+        sign = '-' if mode == '출고' else '+'
+        alerts.append(f'{icon} {canon} {sign}{qty} {mode} — 현재 {after}')
+    if after < int(row.get('최소수량', 0) or 0):
+        alerts.append(f'⚠️ 저재고: {canon} {after} (최소 {row["최소수량"]})')
+    return {'stock': work, 'ledger': ledger, 'aliases': aliases_w,
+            'alerts': alerts, 'pending': pending, 'alias_adds': alias_adds}
+
+
+def apply_adjust(cfg: dict, raw_item: str, qty: int, mode: str, run_claude) -> dict:
+    """단건 수동 조정(출고/실사/입고)을 재고 xlsx에 반영. 엑셀 열림이면 skip."""
+    import supply_store as store
+    folder = Path(cfg['folder'])
+    stock_path = folder / cfg['stock_xlsx']
+    ledger_path = folder / cfg['ledger_xlsx']
+    if store.is_locked(stock_path) or store.is_locked(ledger_path):
+        return {'error': 'locked'}
+    stock = store.read_stock(stock_path)
+    aliases = store.read_aliases(stock_path)
+    res = process_adjust(raw_item, qty, mode, stock, aliases, make_llm_resolver(run_claude),
+                         default_min=cfg.get('default_min_qty', 1),
+                         auto=cfg.get('match_confidence_auto', 'high'))
+    if res.get('alias_adds'):
+        full = store.read_aliases_full(stock_path)
+        full.update(res['alias_adds'])
+        store.write_aliases(stock_path, full)
+    if res['ledger']:
+        store.write_stock(stock_path, res['stock'])
+        store.append_ledger(ledger_path, res['ledger'])
+    return res
