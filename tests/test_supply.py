@@ -217,6 +217,31 @@ class InboundTest(unittest.TestCase):
     def test_llm_parse_bad_output(self):
         self.assertEqual(self.m.parse_purchase_table_llm("x", lambda p: '죄송 JSON없음'), [])
 
+    def test_parse_pack(self):
+        self.assertEqual(self.m.parse_pack('16온스 종이컵, 1000개'), ('16온스 종이컵', 1000))
+        self.assertEqual(self.m.parse_pack('클립10박스'), ('클립', 10))
+        self.assertEqual(self.m.parse_pack('핸드워시, 4L, 4개'), ('핸드워시, 4L', 4))
+        self.assertEqual(self.m.parse_pack('클래식 점보롤'), ('클래식 점보롤', 1))
+        self.assertEqual(self.m.parse_pack('A4용지'), ('A4용지', 1))
+        self.assertEqual(self.m.parse_pack('AA건전지, 32개입'), ('AA건전지', 32))
+
+    def test_inbound_multiplies_pack(self):
+        # '16온스 종이컵, 1000개' 5팩 → 5000개, 규격 보존(canonical='16온스 종이컵')
+        rows = [{'품명': '16온스 종이컵, 1000개', '수량': 5, '부서': '전부서'}]
+        res = self.m.process_inbound(rows, {}, {}, hi_resolver('16온스 종이컵'))
+        self.assertEqual(res['stock']['16온스 종이컵']['현재수량'], 5000)
+        self.assertEqual(res['ledger'][0]['수량'], 5000)
+        self.assertEqual(res['stock']['16온스 종이컵']['단위'], '개')
+
+    def test_inbound_distinct_specs_not_merged(self):
+        # resolver가 입력명을 그대로 canonical로 → 16온스 vs 180ml 분리 유지
+        def keep(raw, known): return {'canonical': raw, 'category': '다과·음료', 'confidence': 'high'}
+        rows = [{'품명': '16온스 종이컵, 1000개', '수량': 5, '부서': 'A'},
+                {'품명': '종이컵 180ml, 2000개', '수량': 2, '부서': 'A'}]
+        res = self.m.process_inbound(rows, {}, {}, keep)
+        self.assertEqual(res['stock']['16온스 종이컵']['현재수량'], 5000)
+        self.assertEqual(res['stock']['종이컵 180ml']['현재수량'], 4000)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -172,10 +172,13 @@ def make_llm_resolver(run_claude):
     def resolver(raw_norm: str, known: list[str]) -> dict:
         prompt = (
             "너는 사무비품 품목명을 표준 품목으로 매칭하는 분류기다. "
-            "아래 '신규 품목명'이 '기존 품목 목록' 중 하나와 같은 물건이면 그 이름을, "
-            "아니면 새 표준명을 제안하라. 반드시 JSON만 출력: "
+            "'신규 품목명'이 '기존 품목 목록' 중 하나와 *확실히 같은 물건*이면 그 이름을(confidence high), "
+            "아니면 입력 품목명을 거의 그대로(규격·용량·사이즈 유지) 표준명으로 써라(confidence high). "
+            "★규격이 다르면 절대 합치지 마라: '16온스 종이컵'과 '종이컵 180ml'는 다른 품목, "
+            "'포스트잇 대'와 '포스트잇 소'도 다른 품목이다. 너무 짧게 일반화(예: 그냥 '종이컵')하지 마라. "
+            "반드시 JSON만 출력: "
             '{"canonical":"표준품목명","category":"사무용품|다과·음료|청소·위생|IT·전자|비품·가구|기타",'
-            '"confidence":"high|low"}. 확실할 때만 high.\n\n'
+            '"confidence":"high|low"}.\n\n'
             f"기존 품목 목록: {known}\n신규 품목명: {raw_norm}")
         txt = (run_claude(prompt) or '').strip()
         m = re.search(r'\{.*\}', txt, re.S)
@@ -310,6 +313,31 @@ def parse_purchase_table_llm(text: str, run_claude) -> list[dict]:
     return rows
 
 
+_PACK_RE = re.compile(r'[,\s]*([0-9][0-9,]*)\s*(개입|매입|개|매|장|입|박스|세트|팩|롤|병|캔|p)\s*$',
+                      re.IGNORECASE)
+
+
+def parse_pack(name: str) -> tuple:
+    """품명 끝의 '팩당 개수' 추출 → (규격유지 정리명, 팩당개수).
+
+    예) '16온스 종이컵, 1000개' → ('16온스 종이컵', 1000)
+        '클립10박스' → ('클립', 10) · '핸드워시, 4L, 4개' → ('핸드워시, 4L', 4)
+        '클래식 점보롤' → ('클래식 점보롤', 1)  (팩 표기 없음)
+    """
+    name = (name or '').strip()
+    m = _PACK_RE.search(name)
+    if not m:
+        return name, 1
+    try:
+        size = int(m.group(1).replace(',', ''))
+    except ValueError:
+        return name, 1
+    clean = name[:m.start()].rstrip(' ,·-').strip()
+    if clean and size > 1:
+        return clean, size
+    return name, 1
+
+
 def process_inbound(rows: list[dict], stock: dict, aliases: dict, resolver,
                     default_min: int = 1, auto: str = 'high') -> dict:
     """입고 행들 → 재고 가산(결정적). 순수: 원본 미변경, 변경분 반환.
@@ -323,15 +351,18 @@ def process_inbound(rows: list[dict], stock: dict, aliases: dict, resolver,
     ledger, alerts, pending, alias_adds = [], [], [], {}
     for r in rows:
         raw = (r.get('품명') or '').strip()
-        qty = int(r.get('수량') or 0)
+        packs = int(r.get('수량') or 0)
         dept = r.get('부서', '')
-        if not raw or qty <= 0:
+        if not raw or packs <= 0:
             alerts.append(f'⚠️ 건너뜀(품명/수량 확인): "{raw}" x {r.get("수량")}')
             continue
-        res = resolve_item(raw, sorted(work.keys()), aliases_w, resolver, auto=auto)
+        # 품명 끝의 '팩당 개수'를 떼어내 실제 입고 개수 = 팩수 × 팩당개수.
+        clean, pack = parse_pack(raw)
+        eff = packs * pack
+        res = resolve_item(clean, sorted(work.keys()), aliases_w, resolver, auto=auto)
         if res['status'] == 'pending':
-            pending.append({'raw_item': raw, 'qty': qty, 'suggest': res.get('canonical', '')})
-            alerts.append(f'❓ 품목 확인 필요(입고 보류): "{raw}" → 제안 "{res.get("canonical") or "?"}"')
+            pending.append({'raw_item': raw, 'qty': eff, 'suggest': res.get('canonical', '')})
+            alerts.append(f'❓ 품목 확인 필요(입고 보류): "{clean}" → 제안 "{res.get("canonical") or "?"}"')
             continue
         canon = res['canonical']
         if res.get('confidence') != 'cached' and res['alias_norm'] not in aliases_w:
@@ -341,15 +372,18 @@ def process_inbound(rows: list[dict], stock: dict, aliases: dict, resolver,
         row = work.get(canon)
         if row is None:
             row = {'품목': canon, '카테고리': res.get('category', ''), '현재수량': 0,
-                   '최소수량': default_min, '단위': '', '비고': ''}
+                   '최소수량': default_min, '단위': ('개' if pack > 1 else ''), '비고': ''}
             work[canon] = row
             alerts.append(f'🆕 신규 품목 "{canon}" 추가')
-        after = int(row['현재수량']) + qty
+        after = int(row['현재수량']) + eff
         row['현재수량'] = after
         ledger.append({'일시': _now_kst(), '유형': '입고', 'canonical품목': canon,
-                       '원문품목': raw, '수량': qty, '처리후잔여': after,
+                       '원문품목': raw, '수량': eff, '처리후잔여': after,
                        '신청자/발주처': dept, '출처키': 'manual'})
-        alerts.append(f'📥 {canon} +{qty} 입고 — 현재 {after}')
+        if pack > 1:
+            alerts.append(f'📥 {canon} +{eff}개 입고 ({packs}×{pack}) — 현재 {after}')
+        else:
+            alerts.append(f'📥 {canon} +{eff} 입고 — 현재 {after}')
     return {'stock': work, 'ledger': ledger, 'aliases': aliases_w,
             'alerts': alerts, 'pending': pending, 'alias_adds': alias_adds}
 
