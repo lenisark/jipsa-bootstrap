@@ -684,15 +684,45 @@ def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
 
 # ── 비품관리 슬랙 명령 (jipsa 2.0 P2) ──────────────────────────────
 def _supply_match_claude(prompt: str, cfg: dict) -> str:
-    """품목 매칭용 1회성 claude 호출(새 세션, 도구 없음)."""
+    """품목 매칭/표파싱용 1회성 claude 호출(새 세션, 도구 없음)."""
     notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     try:
-        r = _run_claude(prompt, str(uuid.uuid4()), True, 120, 'sonnet',
+        r = _run_claude(prompt, str(uuid.uuid4()), True, 220, 'sonnet',
                         cfg.get('cwd'), [], notools)
-        return r.stdout or '' if r.returncode == 0 else ''
-    except Exception:
+        if r.returncode != 0:
+            log(f'  supply claude rc={r.returncode}: {(r.stderr or "")[-200:]}')
+            return ''
+        return r.stdout or ''
+    except subprocess.TimeoutExpired:
+        log('  supply claude TIMEOUT')
         return ''
+    except Exception as e:
+        log(f'  supply claude exc: {e}')
+        return ''
+
+
+_inbound_wait: dict = {}   # (channel, user) -> 만료 epoch. `입고등록`만 보낸 뒤 표 대기.
+
+
+def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
+    """구매표(body) 파싱 → 입고 반영 → 결과 게시. 처리했으면 True."""
+    rows = sply.parse_purchase_table(body)
+    used_llm = False
+    log(f'입고등록 처리: body_len={len(body)} 규칙파서={len(rows)}건')
+    if not rows:                              # 칸 깨진 붙여넣기 → LLM 파싱 폴백
+        rows = sply.parse_purchase_table_llm(body, lambda p: _supply_match_claude(p, cfg))
+        used_llm = bool(rows)
+        log(f'  LLM 폴백 파싱={len(rows)}건')
+    if not rows:
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            "표를 못 읽었어요. 품명·수량이 있는 표를 붙여넣어 주세요.\n"
+            "(엑셀/그룹웨어에서 복사해 붙여도 됩니다)"))
+        return True
+    res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+    hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
+    _supply_reply(channel, res, header=hdr)
+    return True
 
 
 def handle_supply_command(channel: str, user: str, text: str) -> bool:
@@ -706,6 +736,16 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
     t = text.strip()
     first = t.split('\n', 1)[0].strip()
     managers = set(cfg.get('managers', [])) | ({MIRI} if MIRI else set())
+    key = (channel, user)
+
+    # `입고등록`만 먼저 보낸 담당자가 이어서 표를 붙여넣은 경우 → 이 메시지를 표로 처리
+    if key in _inbound_wait:
+        if time.time() > _inbound_wait.get(key, 0):
+            _inbound_wait.pop(key, None)
+        elif first not in ('입고등록', '입고 등록', '재고', '비품현황', '재고현황') \
+                and not re.match(r'^(입고|재고)\s', first):
+            _inbound_wait.pop(key, None)
+            return _do_inbound_register(channel, t, cfg)
 
     def deny():
         try:
@@ -756,24 +796,17 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
         _supply_reply(channel, res)
         return True
 
-    # 입고등록 + 표 붙여넣기 (담당자만)
+    # 입고등록 (담당자만). 표가 같은 메시지에 있으면 바로, 없으면 다음 메시지 대기.
     if first in ('입고등록', '입고 등록'):
         if user not in managers:
             return deny()
         body = t.split('\n', 1)[1] if '\n' in t else ''
-        rows = sply.parse_purchase_table(body)
-        used_llm = False
-        if not rows:                              # 칸 구분이 깨진 붙여넣기 → LLM 파싱 폴백
-            rows = sply.parse_purchase_table_llm(body, lambda p: _supply_match_claude(p, cfg))
-            used_llm = bool(rows)
-        if not rows:
-            web.chat_postMessage(channel=channel, mrkdwn=True, text=(
-                "표를 못 읽었어요. `입고등록` 다음 줄부터 표를 붙여넣어 주세요.\n"
-                "(엑셀/그룹웨어에서 복사해 붙여도 됩니다 — 칸이 붙어 있어도 집사가 읽어봐요)"))
-            return True
-        res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
-        hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
-        _supply_reply(channel, res, header=hdr)
+        if body.strip():
+            return _do_inbound_register(channel, body, cfg)
+        _inbound_wait[key] = time.time() + 180          # 3분 내 다음 메시지를 표로
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            "📥 이어서 *구매표를 붙여넣어* 주세요 (3분 내, 이 채널에).\n"
+            "엑셀/그룹웨어에서 복사해 붙여도 돼요. 품명·수량만 있으면 됩니다."))
         return True
 
     return False
@@ -950,6 +983,14 @@ def handle_message(event: dict) -> None:
     access = ch_cfg.get('access', 'owner')
     if not is_dialog and access == 'owner' and not is_miri:
         return  # 개인 채널은 소유자만 응답
+
+    # 입고등록 표 대기 중인 담당자는 멘션 없이도 다음 메시지(표)를 이어받는다.
+    if not is_dialog and (channel, user) in _inbound_wait:
+        try:
+            if handle_supply_command(channel, user, text):
+                return
+        except Exception as e:
+            log(f'  supply wait err: {e}')
 
     # @멘션 게이트: require_mention 채널(부서 공용)은 봇이 멘션됐을 때만 응답
     if not is_dialog and ch_cfg.get('require_mention'):
