@@ -273,6 +273,43 @@ def parse_purchase_table(text: str) -> list[dict]:
     return rows
 
 
+def parse_purchase_table_llm(text: str, run_claude) -> list[dict]:
+    """칸 구분이 깨진(탭 없이 뭉개진) 붙여넣기 표를 LLM으로 추출 → [{품명,수량,부서}].
+
+    규칙 파서(parse_purchase_table)가 0건일 때 폴백. 금액(쉼표 큰 수)을 수량으로
+    착각하지 않도록 컬럼 순서를 명시한다.
+    """
+    prompt = (
+        "다음은 붙여넣은 '비품 구매 표'인데 칸 구분이 깨져 글자가 붙어 있다. "
+        "각 구매 항목을 정확히 분리해 JSON 배열로만 출력하라. "
+        "각 원소는 {\"품명\":문자열, \"수량\":정수, \"부서\":문자열}. "
+        "표의 컬럼 순서는 보통: 번호 · 품명 · 수량 · 금액 · 계좌/링크 · 출금계좌 · 부서. "
+        "주의: *수량* 은 품명 바로 뒤의 작은 정수다. 쉼표가 들어간 큰 수(예: 179,250)는 "
+        "금액이니 수량으로 쓰지 마라. '계좌/링크' 칸은 품명과 비슷하게 반복될 수 있다. "
+        "행 끝은 부서명(전부서/인사총무/관리사무소/영업1본부 등)이다. JSON 외에는 아무것도 출력하지 마라.\n\n"
+        f"표:\n{text}")
+    out = (run_claude(prompt) or '').strip()
+    m = re.search(r'\[.*\]', out, re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return []
+    rows = []
+    for d in data:
+        if not isinstance(d, dict):
+            continue
+        name = (d.get('품명') or '').strip()
+        try:
+            qty = int(d.get('수량'))
+        except (TypeError, ValueError):
+            continue
+        if name and qty > 0:
+            rows.append({'품명': name, '수량': qty, '부서': (d.get('부서') or '').strip()})
+    return rows
+
+
 def process_inbound(rows: list[dict], stock: dict, aliases: dict, resolver,
                     default_min: int = 1, auto: str = 'high') -> dict:
     """입고 행들 → 재고 가산(결정적). 순수: 원본 미변경, 변경분 반환.

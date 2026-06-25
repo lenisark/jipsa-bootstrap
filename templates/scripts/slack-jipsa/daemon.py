@@ -762,13 +762,18 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
             return deny()
         body = t.split('\n', 1)[1] if '\n' in t else ''
         rows = sply.parse_purchase_table(body)
+        used_llm = False
+        if not rows:                              # 칸 구분이 깨진 붙여넣기 → LLM 파싱 폴백
+            rows = sply.parse_purchase_table_llm(body, lambda p: _supply_match_claude(p, cfg))
+            used_llm = bool(rows)
         if not rows:
             web.chat_postMessage(channel=channel, mrkdwn=True, text=(
                 "표를 못 읽었어요. `입고등록` 다음 줄부터 표를 붙여넣어 주세요.\n"
-                "예) `품명 [탭] 수량 [탭] 금액 …` 또는 `품명 | 수량 | 금액 …`"))
+                "(엑셀/그룹웨어에서 복사해 붙여도 됩니다 — 칸이 붙어 있어도 집사가 읽어봐요)"))
             return True
         res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
-        _supply_reply(channel, res, header=f'입고등록 {len(rows)}행 처리')
+        hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
+        _supply_reply(channel, res, header=hdr)
         return True
 
     return False

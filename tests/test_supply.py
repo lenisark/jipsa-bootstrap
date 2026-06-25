@@ -204,6 +204,19 @@ class InboundTest(unittest.TestCase):
         self.assertEqual(res['stock'], {})
         self.assertEqual(len(res['pending']), 1)
 
+    def test_llm_parse_fallback(self):
+        # run_claude 가 JSON 배열을 돌려준다고 가정(칸 깨진 표를 LLM이 추출한 결과)
+        def fake(prompt):
+            return ('답: [{"품명":"16온스 종이컵, 1000개","수량":5,"부서":"전부서"},'
+                    '{"품명":"클래식 점보롤","수량":12,"부서":"관리사무소"}] 끝')
+        rows = self.m.parse_purchase_table_llm("아무 뭉개진 텍스트", fake)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['수량'], 5)
+        self.assertEqual(rows[1]['품명'], '클래식 점보롤')
+
+    def test_llm_parse_bad_output(self):
+        self.assertEqual(self.m.parse_purchase_table_llm("x", lambda p: '죄송 JSON없음'), [])
+
 
 if __name__ == '__main__':
     unittest.main()
