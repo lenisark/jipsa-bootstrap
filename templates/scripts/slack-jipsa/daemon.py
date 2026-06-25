@@ -955,10 +955,53 @@ def notion_log_turn(channel: str, event_ts: str, user_text: str, reply_text: str
         log(f'  notion log fail: {e}')
 
 
+def _cell_text(node) -> str:
+    """리치텍스트 노드(셀)에서 모든 text를 이어붙여 추출."""
+    out = []
+
+    def walk(e):
+        if isinstance(e, dict):
+            if e.get('type') in ('text', 'raw_text'):   # 헤더=text, 데이터셀=raw_text
+                out.append(e.get('text', ''))
+            elif e.get('type') == 'link':
+                out.append(e.get('text') or e.get('url', ''))
+            for v in e.values():
+                if isinstance(v, (list, dict)):
+                    walk(v)
+        elif isinstance(e, list):
+            for x in e:
+                walk(x)
+    walk(node)
+    return ''.join(out).strip()
+
+
+def _extract_event_text(event: dict) -> str:
+    """event['text'] 우선. 비면 붙여넣은 표(attachments/blocks의 type=table)를
+    탭구분 텍스트로 변환해 반환(슬랙 리치 테이블 붙여넣기 대응)."""
+    txt = (event.get('text') or '').strip()
+    containers = []
+    for att in (event.get('attachments') or []):
+        containers += att.get('blocks') or []
+    containers += event.get('blocks') or []
+    lines = []
+    for b in containers:
+        if isinstance(b, dict) and b.get('type') == 'table':
+            for row in (b.get('rows') or []):
+                if isinstance(row, list):
+                    lines.append('\t'.join(_cell_text(c) for c in row))
+                elif isinstance(row, dict):           # 행이 dict 형태일 때
+                    cells = row.get('cells') or row.get('elements') or []
+                    lines.append('\t'.join(_cell_text(c) for c in cells))
+    table_txt = '\n'.join(ln for ln in lines if ln.strip())
+    if table_txt.strip():
+        return (txt + '\n' + table_txt).strip() if txt else table_txt
+    return txt
+
+
 def handle_message(event: dict) -> None:
     """사용자 메시지 처리 + (대화 채널이면) 다른 봇 메시지에도 반응."""
     global _dialog_self_turn_count
-    text = event.get('text', '').strip()
+    text = _extract_event_text(event)
     channel = event.get('channel', '')
     ts = event.get('ts', '')
     user = event.get('user', '')
