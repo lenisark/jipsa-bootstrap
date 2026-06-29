@@ -217,6 +217,20 @@ class InboundTest(unittest.TestCase):
     def test_llm_parse_bad_output(self):
         self.assertEqual(self.m.parse_purchase_table_llm("x", lambda p: '죄송 JSON없음'), [])
 
+    def test_batch_resolver_one_call(self):
+        calls = []
+        def fake(prompt):
+            calls.append(1)
+            return ('잡담 [{"in":"16온스 종이컵","canonical":"16온스 종이컵","category":"다과·음료","confidence":"high"},'
+                    '{"in":"마우수","canonical":"마우스","category":"IT·전자","confidence":"high"}] 끝')
+        res = self.m.resolve_batch_llm(['16온스 종이컵', '마우수'], [], fake)
+        self.assertEqual(len(calls), 1)                  # 여러 품목 → 단 1회 호출
+        self.assertEqual(res['16온스 종이컵']['canonical'], '16온스 종이컵')
+        self.assertEqual(res['마우수']['canonical'], '마우스')
+
+    def test_batch_resolver_empty(self):
+        self.assertEqual(self.m.resolve_batch_llm([], [], lambda p: 'x'), {})
+
     def test_parse_pack(self):
         self.assertEqual(self.m.parse_pack('16온스 종이컵, 1000개'), ('16온스 종이컵', 1000))
         self.assertEqual(self.m.parse_pack('클립10박스'), ('클립', 10))

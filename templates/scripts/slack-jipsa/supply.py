@@ -167,6 +167,40 @@ def fetch_list_records(web, list_id: str) -> list[dict]:
     return items
 
 
+def resolve_batch_llm(names_norm: list, known: list, run_claude) -> dict:
+    """여러 정규화 품목명을 *한 번의 LLM 호출* 로 매칭. {norm: {canonical,category,confidence}}.
+
+    입고등록처럼 신규 품목이 많을 때 품목당 호출(N번)을 1번으로 줄인다.
+    """
+    if not names_norm:
+        return {}
+    numbered = '\n'.join(f'{i + 1}. {n}' for i, n in enumerate(names_norm))
+    prompt = (
+        "여러 사무비품 품목명을 표준 품목으로 매칭하라. 각 입력에 대해 '기존 품목 목록'에 "
+        "*확실히 같은 물건*이 있으면 그 이름을, 없으면 입력명을 규격(16온스/180ml/대·소·용량) 유지해 "
+        "거의 그대로 표준명으로 써라. ★규격이 다르면 절대 합치지 마라(예: '16온스 종이컵'≠'종이컵 180ml'). "
+        "너무 짧게 일반화하지 마라. 반드시 JSON 배열만, 입력 순서대로 출력: "
+        '[{"in":"입력명","canonical":"표준명",'
+        '"category":"사무용품|다과·음료|청소·위생|IT·전자|비품·가구|기타","confidence":"high|low"}].\n\n'
+        f"기존 품목 목록: {known}\n입력 품목들:\n{numbered}")
+    out = (run_claude(prompt) or '').strip()
+    m = re.search(r'\[.*\]', out, re.S)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return {}
+    res = {}
+    for d in data:
+        if isinstance(d, dict) and d.get('in') and d.get('canonical'):
+            res[normalize_name(str(d['in']))] = {
+                'canonical': str(d['canonical']).strip(),
+                'category': d.get('category', ''),
+                'confidence': d.get('confidence', 'low')}
+    return res
+
+
 def make_llm_resolver(run_claude):
     """run_claude(prompt)->str(JSON) 를 받아 resolver(raw,known)->dict 생성."""
     def resolver(raw_norm: str, known: list[str]) -> dict:
@@ -395,7 +429,11 @@ def read_inventory(cfg: dict) -> dict:
 
 
 def apply_inbound(cfg: dict, rows: list[dict], run_claude) -> dict:
-    """입고 행들을 재고 xlsx에 반영(가산)하고 결과 반환. 엑셀 열림이면 skip."""
+    """입고 행들을 재고 xlsx에 반영(가산)하고 결과 반환. 엑셀 열림이면 skip.
+
+    성능: 캐시에 없는 신규 품목명을 모아 *한 번의 LLM 호출* 로 일괄 매칭한 뒤
+    별칭 캐시에 주입 → process_inbound는 품목당 LLM 호출 없이 결정적으로 처리.
+    """
     import supply_store as store
     folder = Path(cfg['folder'])
     stock_path = folder / cfg['stock_xlsx']
@@ -404,12 +442,42 @@ def apply_inbound(cfg: dict, rows: list[dict], run_claude) -> dict:
         return {'error': 'locked'}
     stock = store.read_stock(stock_path)
     aliases = store.read_aliases(stock_path)
-    res = process_inbound(rows, stock, aliases, make_llm_resolver(run_claude),
-                          default_min=cfg.get('default_min_qty', 1),
-                          auto=cfg.get('match_confidence_auto', 'high'))
-    if res.get('alias_adds'):
+    auto = cfg.get('match_confidence_auto', 'high')
+
+    # 1) 캐시에 없는 신규 품목(규격정리명) 수집 → 1회 일괄 매칭
+    known = sorted(stock.keys())
+    misses, seen = [], set()
+    for r in rows:
+        clean, _ = parse_pack((r.get('품명') or '').strip())
+        n = normalize_name(clean)
+        if n and n not in aliases and n not in seen:
+            seen.add(n)
+            misses.append(n)
+    batch = resolve_batch_llm(misses, known, run_claude) if misses else {}
+    seed_meta, cat_by_canon = {}, {}
+    for n, sug in batch.items():
+        if sug.get('canonical') and sug.get('confidence') == auto:
+            aliases[n] = sug['canonical']            # 캐시 주입(LLM 재호출 방지)
+            seed_meta[n] = {'canonical': sug['canonical'], '출처': 'order',
+                            '확신도': sug.get('confidence', ''), '결정방식': 'batch',
+                            '결정시각': _now_kst()}
+            cat_by_canon[sug['canonical']] = sug.get('category', '')
+
+    # 2) 결정적 처리(캐시 적중분은 LLM 없음, 미해결은 pending)
+    res = process_inbound(rows, stock, aliases, lambda raw, kn: {'confidence': 'low'},
+                          default_min=cfg.get('default_min_qty', 1), auto=auto)
+
+    # 3) 신규 품목 카테고리 보강(캐시 경로는 카테고리가 비므로 일괄 결과로 채움)
+    for canon, row in res['stock'].items():
+        if not row.get('카테고리') and cat_by_canon.get(canon):
+            row['카테고리'] = cat_by_canon[canon]
+
+    # 4) 별칭 영속화: 일괄 매칭 결과(seed_meta) + process가 만든 alias_adds
+    adds = dict(seed_meta)
+    adds.update(res.get('alias_adds') or {})
+    if adds:
         full = store.read_aliases_full(stock_path)
-        full.update(res['alias_adds'])
+        full.update(adds)
         store.write_aliases(stock_path, full)
     if res['ledger']:
         store.write_stock(stock_path, res['stock'])
