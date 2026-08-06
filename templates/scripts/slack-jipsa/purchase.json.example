@@ -7,6 +7,10 @@
   "month_record_template": "비품 주문 기록_202605.xlsx",
   "analysis_prefix": "비품주문분석",
   "classify_cache": "~/.claude/scripts/slack-jipsa/supply_classify.json",
+  "known_depts": ["전부서 공통", "인사총무", "매입부", "제휴매입파트", "관리사무소",
+                  "영업본부", "영업시스템본부", "마케팅팀", "고객지원팀", "행정지원파트",
+                  "네트웍스", "CX파트", "상무님", "대표님", "재무회계"],
+  "dept_aliases": {},
   "managers": ["U0ANN3GJRDE"],
   "schedule": { "enabled": true, "day": 5, "hour": 10 },
   "dry_run": true
