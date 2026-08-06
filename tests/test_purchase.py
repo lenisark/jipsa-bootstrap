@@ -95,5 +95,19 @@ class PivotTest(unittest.TestCase):
         self.assertEqual(p['월합']['2월'], 5000)
         self.assertEqual(p['top20'][0][0], 5000)      # 금액 내림차순
 
+class ReflectTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_to_integrated(self):
+        inp=[{'일자':'2026-08-06','부서':'재무회계','용도':'사내비품','카테고리':'IT·전자',
+              '품목':'무선마우스','수량':2,'단가':49900,'금액':99800}]
+        out=self.m.month_records_to_integrated(inp,'8월','202608',1)
+        self.assertEqual(out[0]['월'],'8월'); self.assertEqual(out[0]['금액'],99800)
+        self.assertEqual(out[0]['일자'],'6일'); self.assertEqual(out[0]['블록ID'],'202608#1')
+    def test_unreflected(self):
+        integ=[{'월':'5월'}]
+        self.assertTrue(self.m.unreflected_months(integ,'8월'))
+        self.assertFalse(self.m.unreflected_months(integ,'5월'))
+
 if __name__ == '__main__':
     unittest.main()

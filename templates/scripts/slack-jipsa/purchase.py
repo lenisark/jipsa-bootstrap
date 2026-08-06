@@ -89,6 +89,27 @@ def _amt(v):
     try: return int(float(str(v).replace(',', '')))
     except (TypeError, ValueError): return 0
 
+def _day_of(v):
+    s = str(v or '')
+    m = re.search(r'(\d{1,2})\s*일', s)
+    if m: return f'{int(m.group(1))}일'
+    m = re.search(r'\d{4}-\d{2}-(\d{2})', s)
+    if m: return f'{int(m.group(1))}일'
+    return s
+
+def month_records_to_integrated(input_rows, month_label, yyyymm, seq_start=1):
+    out=[]; seq=seq_start
+    for r in input_rows:
+        out.append({'월':month_label,'일자':_day_of(r.get('일자')),'부서':r.get('부서',''),
+                    '용도':r.get('용도',''),'카테고리':r.get('카테고리',''),'품목':r.get('품목',''),
+                    '금액':_amt(r.get('금액')),'블록ID':f'{yyyymm}#{seq}'})
+        seq+=1
+    return out
+
+def unreflected_months(integrated_rows, candidate_month) -> bool:
+    have = {str(r.get('월','')).strip() for r in integrated_rows}
+    return candidate_month not in have
+
 def compute_pivots(rows) -> dict:
     from collections import defaultdict
     dm = defaultdict(int); cm = defaultdict(int); um = defaultdict(int)
