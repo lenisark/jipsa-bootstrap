@@ -58,3 +58,26 @@ def read_integrated(analysis_path) -> list:
         if not r or r[0] in (None,''): continue
         out.append({h:(r[i] if i < len(r) else None) for i,h in enumerate(INTEGRATED_HEADERS)})
     return out
+
+import re as _re
+def latest_analysis(folder, prefix):
+    folder = Path(folder); best=None; bestv=(0,0)
+    for p in folder.glob(f'*{prefix}-v*.xlsx'):
+        m=_re.search(r'-v(\d+)\.(\d+)\.xlsx$', p.name)
+        if not m: continue
+        v=(int(m.group(1)),int(m.group(2)))
+        if v>bestv: bestv, best = v, p
+    return best, bestv
+
+def next_version(v): return (v[0], v[1]+1)
+
+def write_merged_analysis(src_path, out_path, new_integrated_rows, pivots=None):
+    wb = openpyxl.load_workbook(Path(src_path))
+    ws = wb[INTEGRATED_SHEET]
+    last = ws.max_row
+    for i,r in enumerate(new_integrated_rows, start=last+1):
+        for ci,h in enumerate(INTEGRATED_HEADERS, start=1):
+            ws.cell(row=i, column=ci).value = r.get(h,'')
+    if pivots is not None:
+        _apply_pivots(wb, pivots)     # PIVOT_LAYOUT 기반 셀 값 갱신(Task 12)
+    _atomic_save(wb, Path(out_path))

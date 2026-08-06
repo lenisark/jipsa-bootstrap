@@ -49,3 +49,29 @@ class IntegratedTest(unittest.TestCase):
             wb.save(p); wb.close()
             rows=self.m.read_integrated(p)
             self.assertEqual(rows[0]['부서'],'인사총무'); self.assertEqual(rows[0]['금액'],1000)
+
+class MergeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_latest_analysis(self):
+        import tempfile, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            for name in ['260101-HGA-비품주문분석-v1.2.xlsx','260501-HGA-비품주문분석-v1.10.xlsx']:
+                wb=openpyxl.Workbook(); wb.save(d/name); wb.close()
+            p,(maj,mn)=self.m.latest_analysis(d,'비품주문분석')
+            self.assertEqual((maj,mn),(1,10))            # 1.10 > 1.2
+    def test_append_integrated(self):
+        import tempfile, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d); src=d/'src.xlsx'; out=d/'out.xlsx'
+            wb=openpyxl.Workbook(); ws=wb.active; ws.title='통합원본'
+            ws.append(['월','일자','부서','용도','카테고리','품목','금액','블록ID'])
+            ws.append(['1월','6일','인사총무','사내비품','사무용품','볼펜',1000,'1월#1'])
+            wb.save(src); wb.close()
+            new=[{'월':'8월','일자':'6일','부서':'재무회계','용도':'사내비품','카테고리':'IT·전자','품목':'마우스','금액':99800,'블록ID':'202608#1'}]
+            self.m.write_merged_analysis(src, out, new, pivots=None)
+            wb=openpyxl.load_workbook(out); ws=wb['통합원본']
+            self.assertEqual(ws.max_row, 3); self.assertEqual(ws['A3'].value,'8월')
