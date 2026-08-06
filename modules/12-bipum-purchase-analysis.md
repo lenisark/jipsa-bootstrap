@@ -55,7 +55,7 @@ cp templates/scripts/slack-jipsa/purchase.json.example ~/.claude/scripts/slack-j
 | `classify_cache` | 품목→{용도,카테고리} 분류 캐시 JSON 경로 | 파일이 없으면 최초 실행 시 자동 생성 |
 | `known_depts` | 부서명 정규화 어휘(고정 마스터) | 여기 없으면 "신규 부서 후보" 경고가 붙는다 |
 | `dept_aliases` | 원문 부서명→표준 부서명 수동 매핑 | 기본 `{}`. 오탐이 반복되면 여기 추가 |
-| `managers` | 비품 담당자 슬랙 User ID 목록 | `분석 갱신[ 확정]`·`입고등록`·`출고`/`실사` 명령 권한자 |
+| `managers` | 비품 담당자 슬랙 User ID 목록 | `분석 갱신[ 확정]`·`입고등록`·`출고`/`실사` 명령 권한자(구매기록 모드에서는 `supply.json`의 `managers`와 합집합으로 적용됨) |
 | `schedule.enabled` | 월간 자동 제안 on/off | `true` 권장(제안만 하므로 안전) |
 | `schedule.day` | 매달 제안을 올릴 날짜(영업일 보정) | 주말·공휴일이면 직전 영업일로 당겨짐(`reminders.effective_notify_date`) |
 | `schedule.hour` | 제안을 올릴 시각(시) | 이 시각 이후 첫 폴링 주기(30분 간격 점검)에 발송 |
@@ -63,8 +63,8 @@ cp templates/scripts/slack-jipsa/purchase.json.example ~/.claude/scripts/slack-j
 
 ## 슬랙 명령
 
-- **`입고등록`** (붙여넣기) — 구매표를 파싱해 구매기록에 적재. 표를 같은 메시지에 붙이면 즉시 처리, 명령만 먼저 보내면 3분간 다음 메시지를 표로 대기(`_inbound_wait`). 담당자만.
-- **`분석 갱신 [YYYYMM]`** — 해당 월(생략 시 지난달) 반영 제안을 dry_run으로 계산해 채널에 게시(신규 건수·해당 월 합계·전체 총계). 담당자만.
+- **`입고등록`** (붙여넣기) — 구매표를 파싱해 구매기록에 적재. 표를 같은 메시지에 붙이면 즉시 처리, 명령만 먼저 보내면 3분간 다음 메시지를 표로 대기(`_inbound_wait`). 담당자만(구매기록 모드에서는 `supply.json` + `purchase.json` 양쪽 `managers`가 모두 권한자 — `handle_supply_command`가 `mode: "purchase"`일 때 두 목록을 합집합으로 검사한다). `출고`/`실사`도 동일하게 적용된다.
+- **`분석 갱신 [YYYYMM]`** — 해당 월(생략 시 지난달) 반영 제안을 dry_run으로 계산해 채널에 게시(신규 건수·해당 월 합계·전체 총계). `purchase.json`의 `managers`만 권한자(이 명령은 별도로 게이팅됨, `supply.json` managers는 관여하지 않음).
 - **`분석 갱신 확정 [YYYYMM]`** — 실제로 병합해 새 버전 분석 파일을 저장. 담당자만.
 - **월간 자동 제안** — `schedule.enabled`면 매달 `schedule.day` 영업일 `schedule.hour` 이후 지난달분을 자동으로 dry_run 제안 게시(월 1회, `purchase_state.json`의 `last_fired`로 중복 방지). 자동 확정은 없다 — 항상 사람이 `분석 갱신 확정`을 입력해야 파일이 바뀐다.
 
@@ -88,6 +88,7 @@ cp templates/scripts/slack-jipsa/purchase.json.example ~/.claude/scripts/slack-j
 - **월간 자동 스케줄은 dry_run 제안만 한다.** `_purchase_monthly_loop`는 `merge_month_into_analysis(..., dry_run=True)`만 호출하며 파일을 쓰지 않는다. 실제 파일 반영(새 버전 저장)은 담당자가 `분석 갱신 확정`을 명시적으로 입력했을 때(`confirm=True` → `dry_run=False`)만 일어난다.
 - **`큰지출_TOP20`과 요약 대시보드 추이행은 자동 갱신되지 않는다(현재 한계).** `_apply_pivots`는 `PIVOT_LAYOUT`에 정의된 5개 시트(부서별_월별·카테고리별_월별·용도별_월별·부서x용도·부서x카테고리)만 SUMIFS 기반으로 확장한다. `큰지출_TOP20`(정적 스냅샷)과 `요약_대시보드`(수동 라벨 집계)는 병합 시 코드가 손대지 않으므로, 병합 후 이 두 곳은 **엑셀에서 열어 수동으로 확인/갱신**해야 한다.
 - 파생 피벗 시트(부서별_월별 등)는 새 월 컬럼/신규 부서 행만 추가되고 기존 값(수식)은 보존되므로, 엑셀에서 파일을 열면 자동 재계산되어 기존 월(예: 5월까지) 합계는 구조적으로 불변이다.
+- **분석 워크북은 차트/이미지가 없는 셀·수식 기반 설계이며(검증됨), 그래서 병합이 무손실이다.** `write_merged_analysis`는 `openpyxl.load_workbook` → 수정 → 저장 방식으로 병합하는데, openpyxl은 네이티브 엑셀 차트·삽입 이미지를 로드/저장 왕복 시 보존하지 않고 드롭한다. 실제 운영 파일(`260608-HGA-비품주문분석-v1.2.xlsx`)을 확인한 결과 차트 0개·이미지 0개로, 대시보드가 전부 셀 값/수식(SUMIFS 등)으로만 구성돼 있어 현재 설계에서는 이 유실 경로가 실현되지 않는다. **주의**: 앞으로 이 워크북에 네이티브 차트나 이미지를 추가하면 `분석 갱신 확정` 때 소리 없이 사라진다 — 대시보드는 계속 수식/셀 기반으로 유지할 것(권장). 부득이 차트를 넣어야 한다면 그 전에 `write_merged_analysis`(및 `openpyxl` 저장 경로 전반)를 차트/이미지 보존 방식으로 재검토해야 한다. `tests/test_purchase_regression.py::Regression::test_no_charts_or_images_in_analysis_file`가 실 파일 기준으로 이 상태를 회귀 감시한다(차트/이미지가 생기면 테스트가 실패해 알려준다).
 
 ## 알려진 후속 과제 (미구현, 문서화만)
 

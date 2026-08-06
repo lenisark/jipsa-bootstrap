@@ -872,6 +872,9 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
     t = text.strip()
     first = t.split('\n', 1)[0].strip()
     managers = set(cfg.get('managers', [])) | ({MIRI} if MIRI else set())
+    _pcfg_perm = _load_purchase_cfg()
+    if _pcfg_perm and _pcfg_perm.get('mode') == 'purchase':
+        managers |= set(_pcfg_perm.get('managers', []))
     key = (channel, user)
 
     # `입고등록`만 먼저 보낸 담당자가 이어서 표를 붙여넣은 경우 → 이 메시지를 표로 처리

@@ -40,6 +40,19 @@ class Regression(unittest.TestCase):
         self.assertEqual(sum(p['월합'].values()), p['총계'])   # 내부 정합
         self.assertGreater(p['총계'], 0)
 
+    def test_no_charts_or_images_in_analysis_file(self):
+        """분석 워크북은 차트/이미지가 없는 셀·수식 기반이어야 한다(openpyxl 병합이
+        무손실이라는 전제의 트립와이어). 누군가 네이티브 차트/이미지를 추가하면
+        write_merged_analysis의 openpyxl load→save 왕복에서 유실되므로 이 테스트가
+        실패해 알려준다."""
+        wb = openpyxl.load_workbook(self.analysis)
+        n_charts = sum(len(ws._charts) for ws in wb.worksheets)
+        n_images = sum(len(ws._images) for ws in wb.worksheets)
+        self.assertEqual(n_charts, 0,
+                          '분석 파일에 차트가 있음 — openpyxl 병합(write_merged_analysis) 시 유실 위험')
+        self.assertEqual(n_images, 0,
+                          '분석 파일에 이미지가 있음 — openpyxl 병합(write_merged_analysis) 시 유실 위험')
+
     def test_merge_preserves_months_through_may(self):
         rows, p0 = self._months()
         # 합성 신규 월(가장 큰 월 + 1) 한 건
