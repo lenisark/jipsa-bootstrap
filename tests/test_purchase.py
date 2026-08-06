@@ -109,5 +109,95 @@ class ReflectTest(unittest.TestCase):
         self.assertTrue(self.m.unreflected_months(integ,'8월'))
         self.assertFalse(self.m.unreflected_months(integ,'5월'))
 
+class MergeOrchTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+
+    @staticmethod
+    def _make_analysis(path, integ_rows):
+        import openpyxl
+        wb=openpyxl.Workbook(); ws=wb.active; ws.title='통합원본'
+        ws.append(['월','일자','부서','용도','카테고리','품목','금액','블록ID'])
+        for r in integ_rows:
+            ws.append(r)
+        wb.save(path); wb.close()
+
+    @staticmethod
+    def _make_month_file(path, input_rows):
+        import openpyxl
+        wb=openpyxl.Workbook(); ws=wb.active; ws.title='입력'
+        ws['A1']='비품 주문 기록 — 2026년 __6_월'; ws.append([]); ws.append([])   # r1..r3
+        ws.append(['일자','부서','용도','카테고리','품목','수량','단가','금액','발주처','재구매주기','비고'])  # r4
+        for r in input_rows:
+            ws.append(r)
+        wb.save(path); wb.close()
+
+    def test_nothing_when_already_reflected(self):
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
+            self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+            res=self.m.merge_month_into_analysis(cfg,'202605','2026-08-06',dry_run=True)
+            self.assertEqual(res['status'],'nothing')     # 5월 이미 반영
+
+    def test_nothing_when_month_file_missing(self):
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
+            self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+            res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=True)
+            self.assertEqual(res['status'],'nothing')     # 6월 파일 없음
+
+    def test_proposed_no_write(self):
+        import tempfile, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
+            self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
+            self._make_month_file(d/'비품 주문 기록_202606.xlsx',
+                [['2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'','','']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+            before=sorted(p.name for p in d.iterdir())
+            res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=True)
+            self.assertEqual(res['status'],'proposed')
+            self.assertEqual(res['rows'],1)
+            self.assertIsNone(res['out'])
+            self.assertEqual(res['summary']['월합']['6월'],50000)
+            self.assertEqual(sorted(p.name for p in d.iterdir()), before)   # 파일 무변화
+
+    def test_merged_writes_new_version_only(self):
+        import tempfile, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
+            self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
+            src_mtime=a.stat().st_mtime
+            self._make_month_file(d/'비품 주문 기록_202606.xlsx',
+                [['2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'','','']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+            res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=False)
+            self.assertEqual(res['status'],'merged')
+            out=_P(res['out'])
+            self.assertEqual(out.name,'260806-HGA-비품주문분석-v1.3.xlsx')   # next ver + when yymmdd
+            self.assertTrue(out.exists())
+            self.assertEqual(a.stat().st_mtime, src_mtime)                  # 원본 불변
+            wb=openpyxl.load_workbook(out); ws=wb['통합원본']
+            self.assertEqual(ws.max_row,3); self.assertEqual(ws['A3'].value,'6월')
+
+    def test_yymmdd(self):
+        self.assertEqual(self.m._yymmdd('2026-08-06'),'260806')
+
 if __name__ == '__main__':
     unittest.main()

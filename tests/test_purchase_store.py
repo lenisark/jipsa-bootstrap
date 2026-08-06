@@ -36,6 +36,34 @@ class MonthIOTest(unittest.TestCase):
             wb=openpyxl.load_workbook(out); ws=wb['입력']
             self.assertEqual(ws['A5'].value,'a'); self.assertEqual(ws['A6'].value,'f')
 
+class InputRowsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_read_input_rows_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            tpl = Path(d)/'tpl.xlsx'; make_template(tpl)
+            out = Path(d)/'비품 주문 기록_202608.xlsx'
+            recs=[{'일자':'2026-08-06','부서':'재무회계','용도':'사내비품','카테고리':'IT·전자',
+                   '품목':'무선마우스','수량':2,'단가':49900,'금액':99800,
+                   '발주처':'쿠팡','재구매주기':'','비고':'메모'}]
+            self.m.append_month_records(out, tpl, recs, '8월')
+            rows = self.m.read_input_rows(out)
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            self.assertEqual(r['품목'], '무선마우스')
+            self.assertEqual(r['부서'], '재무회계')
+            self.assertEqual(r['금액'], 99800)
+            self.assertEqual(r['발주처'], '쿠팡')
+            self.assertEqual(r['비고'], '메모')
+            self.assertEqual(set(r.keys()), set(self.m.INPUT_HEADERS))
+    def test_read_input_rows_skips_blank(self):
+        with tempfile.TemporaryDirectory() as d:
+            tpl = Path(d)/'tpl.xlsx'; make_template(tpl)
+            out = Path(d)/'m.xlsx'
+            self.m.append_month_records(out, tpl,
+                [{'일자':'2026-08-06','부서':'x','용도':'y','카테고리':'z','품목':'볼펜','수량':1,'단가':1,'금액':1}], '8월')
+            self.assertEqual(len(self.m.read_input_rows(out)), 1)   # 빈 template 행 무시
+
 class IntegratedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.m = load()

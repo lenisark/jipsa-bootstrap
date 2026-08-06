@@ -46,6 +46,21 @@ def append_month_records(month_path, template_path, records, month_label) -> int
     _atomic_save(wb, month_path)
     return n
 
+def read_input_rows(month_path) -> list:
+    """월별기록 '입력' 시트(헤더 r4, 데이터 r5~)를 INPUT_HEADERS dict 리스트로 읽는다."""
+    wb = openpyxl.load_workbook(Path(month_path), read_only=True, data_only=True)
+    ws = wb[INPUT_SHEET]
+    raw = list(ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True)); wb.close()
+    out = []
+    for r in raw:
+        if not r or all(c in (None, '') for c in r):
+            continue
+        rec = {h: (r[i] if i < len(r) else None) for i, h in enumerate(INPUT_HEADERS)}
+        if rec.get('일자') in (None, '') and rec.get('품목') in (None, ''):
+            continue                       # 빈 서식행 무시
+        out.append(rec)
+    return out
+
 INTEGRATED_HEADERS = ['월','일자','부서','용도','카테고리','품목','금액','블록ID']
 INTEGRATED_SHEET = '통합원본'
 

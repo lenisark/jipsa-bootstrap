@@ -801,6 +801,66 @@ def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
     return True
 
 
+def _default_prev_yyyymm() -> str:
+    """지난달을 YYYYMM으로. KST 기준."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone(timedelta(hours=9)))
+    if rmd is not None:
+        y, mo = rmd._prev_month(now.year, now.month)
+    else:
+        y, mo = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    return f'{y:04d}{mo:02d}'
+
+
+def _post_merge_result(channel: str, res: dict, yyyymm: str) -> None:
+    """merge_month_into_analysis 결과를 채널에 게시."""
+    status = res.get('status')
+    month = res.get('month', '')
+    summary = res.get('summary') or {}
+    if status == 'locked':
+        web.chat_postMessage(channel=channel,
+            text='📕 분석/월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+        return
+    if status == 'nothing':
+        web.chat_postMessage(channel=channel, mrkdwn=True,
+            text=f'{month} 분석은 갱신할 내용이 없어요. (주문기록이 없거나 이미 반영됨)')
+        return
+    monsum = int((summary.get('월합') or {}).get(month, 0) or 0)
+    total = int(summary.get('총계', 0) or 0)
+    cnt = res.get('rows', summary.get('건수', 0))
+    if status == 'proposed':
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f'📊 *{month} 분석 갱신 제안*\n'
+            f'• 신규 {cnt}건 / {month} 합계 {monsum:,}원 / 전체 총계 {total:,}원\n'
+            f'확정하려면 `분석 갱신 확정 {yyyymm}`'))
+        return
+    if status == 'merged':
+        name = Path(res.get('out') or '').name
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f'✅ *{month} 분석 반영 완료*\n'
+            f'• 신규 {cnt}건 / {month} 합계 {monsum:,}원 / 전체 총계 {total:,}원\n'
+            f'• 새 파일: `{name}`'))
+
+
+def _handle_analysis_refresh(channel: str, yyyymm, confirm: bool) -> None:
+    """`분석 갱신[ 확정] [YYYYMM]` 처리. confirm=False면 제안(dry_run), True면 실병합."""
+    pcfg = _load_purchase_cfg()
+    if not (pcfg and pcfg.get('mode') == 'purchase'):
+        return
+    import purchase as pur
+    from datetime import datetime, timezone, timedelta
+    when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
+    yyyymm = yyyymm or _default_prev_yyyymm()
+    try:
+        res = pur.merge_month_into_analysis(pcfg, yyyymm, when, dry_run=not confirm)
+    except Exception as e:
+        log(f'  분석 갱신 실패({yyyymm}): {e}')
+        web.chat_postMessage(channel=channel,
+            text='분석 갱신 중 오류가 났어요. 잠시 후 다시 시도하거나 로그를 확인해 주세요.')
+        return
+    _post_merge_result(channel, res, yyyymm)
+
+
 def handle_supply_command(channel: str, user: str, text: str) -> bool:
     """비품 명령: 재고 / 재고 <품목> / 비품현황 / 입고 <품목> <수량> / 입고등록 <표>.
     조회는 누구나, 입고(쓰기)는 담당자(managers + 소유자)만. 처리했으면 True."""
@@ -829,6 +889,18 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
                                    text='입고 등록은 담당자만 할 수 있어요.')
         except Exception:
             pass
+        return True
+
+    # 분석 갱신[ 확정] [YYYYMM] — 구매기록 모드 전용, 담당자만
+    am = re.match(r'^분석\s*갱신(\s+확정)?(?:\s+(\d{6}))?$', first)
+    if am:
+        pcfg = _load_purchase_cfg()
+        if not (pcfg and pcfg.get('mode') == 'purchase'):
+            return False                     # 구매기록 모드 아니면 미처리
+        pmanagers = set(pcfg.get('managers', [])) | ({MIRI} if MIRI else set())
+        if user not in pmanagers:
+            return deny()
+        _handle_analysis_refresh(channel, am.group(2), bool(am.group(1)))
         return True
 
     # 비품현황 / 재고 전체
@@ -1630,6 +1702,64 @@ def _gate_sweeper() -> None:
             log(f'  sweeper err: {e}')
 
 
+PURCHASE_STATE_FILE = Path.home() / '.claude/scripts/slack-jipsa/purchase_state.json'
+
+
+def _load_purchase_state() -> dict:
+    try:
+        return json.loads(PURCHASE_STATE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_purchase_state(state: dict) -> None:
+    try:
+        PURCHASE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PURCHASE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                                       encoding='utf-8')
+    except Exception as e:
+        log(f'  purchase_state 저장 실패: {e}')
+
+
+def _purchase_monthly_loop(web) -> None:
+    """매월 schedule.day의 영업일 schedule.hour 이후 1회, 지난달 분석 제안(dry_run)을
+    cfg['channel']에 게시. purchase_state.json으로 월 1회 중복 방지. 실병합은 하지 않음."""
+    from datetime import datetime, timezone, timedelta, date as _date
+    KST = timezone(timedelta(hours=9))
+    log('월간 분석 자동 제안 스케줄러 시작')
+    while True:
+        try:
+            pcfg = _load_purchase_cfg()
+            sched = (pcfg or {}).get('schedule') or {}
+            if pcfg and pcfg.get('mode') == 'purchase' and sched.get('enabled'):
+                now = datetime.now(KST)
+                day = int(sched.get('day', 5)); hour = int(sched.get('hour', 10))
+                if rmd is not None:
+                    fire_date = rmd.effective_notify_date(now.year, now.month, day)
+                else:
+                    fire_date = _date(now.year, now.month, min(day, 28))
+                key = f'{now.year:04d}{now.month:02d}'
+                state = _load_purchase_state()
+                if (now.date() == fire_date and now.hour >= hour
+                        and state.get('last_fired') != key):
+                    yyyymm = _default_prev_yyyymm()
+                    when = now.strftime('%Y-%m-%d')
+                    channel = pcfg.get('channel', '')
+                    try:
+                        import purchase as pur
+                        res = pur.merge_month_into_analysis(pcfg, yyyymm, when, dry_run=True)
+                        if channel:
+                            _post_merge_result(channel, res, yyyymm)
+                        state['last_fired'] = key
+                        _save_purchase_state(state)
+                        log(f'월간 분석 제안 발송: {yyyymm} status={res.get("status")}')
+                    except Exception as e:
+                        log(f'  월간 분석 제안 실패: {e}')
+        except Exception as e:
+            log(f'  purchase monthly loop err: {e}')
+        time.sleep(1800)     # 30분마다 조건 점검
+
+
 def main() -> None:
     log(f'=== {BOT_NAME} daemon 시작 (channel={CHANNEL[:6]}.., bot={BOT}) ===')
     sock.socket_mode_request_listeners.append(on_event)
@@ -1649,6 +1779,8 @@ def main() -> None:
     _pcfg = _load_purchase_cfg()
     if _pcfg and _pcfg.get('mode') == 'purchase':
         log('구매기록 모드 — 재고 폴링/차감 비활성')
+        if (_pcfg.get('schedule') or {}).get('enabled'):
+            threading.Thread(target=_purchase_monthly_loop, args=(web,), daemon=True).start()
     else:
         threading.Thread(target=_supply_poll_loop, daemon=True).start()
     # 무한 대기

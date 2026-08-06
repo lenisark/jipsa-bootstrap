@@ -154,3 +154,43 @@ def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(cache2, ensure_ascii=False, indent=2), encoding='utf-8')
     return {'appended': n, 'records': recs, 'warns': warns, 'error': None}
+
+
+def _yymmdd(ymd):
+    return ymd[2:].replace('-', '')          # 2026-08-06 -> 260806
+
+
+def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
+    """최신 분석 로드 → 미반영월 판정 → 월별기록 읽기 → 통합원본 변환 →
+    dry_run이면 제안만, 아니면 새 버전 파일 저장(원본 불변). 결정론적 core(LLM 미사용).
+    반환 {'status':'proposed'|'merged'|'nothing'|'locked','month','rows','out','summary'}."""
+    pstore = _sibling('purchase_store.py')
+    folder = Path(cfg['folder'])
+    month_label = f'{int(yyyymm[4:6])}월'
+    nothing = {'status': 'nothing', 'month': month_label, 'rows': 0, 'out': None, 'summary': {}}
+    analysis, ver = pstore.latest_analysis(folder, cfg['analysis_prefix'])
+    if not analysis:
+        return nothing
+    integ = pstore.read_integrated(analysis)
+    if not unreflected_months(integ, month_label):
+        return nothing                       # 이미 반영된 월
+    month_path = folder / pstore.month_filename(cfg['month_record_pattern'], yyyymm)
+    if not month_path.exists():
+        return nothing                       # 주문기록 파일 없음
+    if pstore.is_locked(analysis) or pstore.is_locked(month_path):
+        return {'status': 'locked', 'month': month_label, 'rows': 0, 'out': None, 'summary': {}}
+    input_rows = pstore.read_input_rows(month_path)
+    new_rows = month_records_to_integrated(input_rows, month_label, yyyymm, seq_start=1)
+    if not new_rows:
+        return nothing
+    all_rows = integ + new_rows
+    pivots = compute_pivots(all_rows)
+    summary = {'월합': pivots['월합'], '총계': pivots['총계'], '건수': len(new_rows)}
+    if dry_run:
+        return {'status': 'proposed', 'month': month_label, 'rows': len(new_rows),
+                'out': None, 'summary': summary}
+    nv = pstore.next_version(ver)
+    out = folder / f"{_yymmdd(when_ymd)}-{cfg['dept_code']}-{cfg['analysis_prefix']}-v{nv[0]}.{nv[1]}.xlsx"
+    pstore.write_merged_analysis(analysis, out, new_rows, pivots)
+    return {'status': 'merged', 'month': month_label, 'rows': len(new_rows),
+            'out': str(out), 'summary': summary}
