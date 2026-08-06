@@ -183,6 +183,19 @@ class InboundTest(unittest.TestCase):
         rows = self.m.parse_purchase_table(txt)
         self.assertEqual([(r['품명'], r['수량']) for r in rows], [('딱풀', 4), ('클립', 2)])
 
+    def test_parse_extracts_amount(self):
+        txt = ("no | 품명 | 수량 | 금액 | 출금계좌 | 부서\n"
+               "1 | 디퓨저 리필액, 6개 | 1 | 30,480 | 대구은행 379-1 | 전부서\n"
+               "12 | 차량용 방향제 | 17 | 423,300 | 대구은행 | 매입부")
+        rows = self.m.parse_purchase_table(txt)
+        self.assertEqual(rows[0]['금액'], 30480)      # 쉼표 제거 정수
+        self.assertEqual(rows[1]['금액'], 423300)
+        self.assertEqual(rows[1]['수량'], 17)          # 수량은 여전히 금액과 구분
+
+    def test_parse_amount_absent_is_zero(self):
+        rows = self.m.parse_purchase_table("딱풀\t4")   # 금액 컬럼 없음
+        self.assertEqual(rows[0]['금액'], 0)
+
     def test_process_inbound_adds(self):
         stock = {'A4용지': {'품목': 'A4용지', '카테고리': '사무용품', '현재수량': 5,
                             '최소수량': 0, '단위': '', '비고': ''}}

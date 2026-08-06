@@ -274,10 +274,10 @@ def sync_once(web, cfg: dict, run_claude, post, dry_run: bool = False) -> dict:
 
 # ── 입고 (P2): 구매표 붙여넣기 → 재고 가산 ───────────────────────────
 def parse_purchase_table(text: str) -> list[dict]:
-    """붙여넣은 구매표 텍스트 → [{품명, 수량, 부서}]. 탭/파이프/2+공백 구분.
+    """붙여넣은 구매표 텍스트 → [{품명, 수량, 금액, 부서}]. 탭/파이프/2+공백 구분.
 
     형식 예: `no  품명  수량  금액  계좌  출금계좌  부서` (앞 no는 선택).
-    품명 뒤 첫 정수 토큰 = 수량(금액보다 앞에 옴). 못 읽는 줄은 건너뛴다.
+    품명 뒤 첫 정수 토큰 = 수량, 그 다음 정수 토큰 = 금액(없으면 0). 못 읽는 줄은 건너뛴다.
     """
     rows = []
     for line in (text or '').splitlines():
@@ -309,12 +309,24 @@ def parse_purchase_table(text: str) -> list[dict]:
         if not name or qty is None:
             continue
         dept = parts[-1] if len(parts) >= 3 and not re.fullmatch(r'[\d,]+', parts[-1]) else ''
-        rows.append({'품명': name, '수량': qty, '부서': dept})
+        # 수량 토큰 이후의 첫 '금액형' 토큰(쉼표 포함 큰 수) = 금액
+        amount = 0
+        seen_qty = False
+        for tok in parts[1:]:
+            t = tok.replace(',', '').strip()
+            if not re.fullmatch(r'\d+', t):
+                continue
+            if not seen_qty:            # 첫 정수 = 수량(위에서 이미 사용)
+                seen_qty = True
+                continue
+            amount = int(t)             # 그 다음 정수 = 금액
+            break
+        rows.append({'품명': name, '수량': qty, '금액': amount, '부서': dept})
     return rows
 
 
 def parse_purchase_table_llm(text: str, run_claude) -> list[dict]:
-    """칸 구분이 깨진(탭 없이 뭉개진) 붙여넣기 표를 LLM으로 추출 → [{품명,수량,부서}].
+    """칸 구분이 깨진(탭 없이 뭉개진) 붙여넣기 표를 LLM으로 추출 → [{품명,수량,금액,부서}].
 
     규칙 파서(parse_purchase_table)가 0건일 때 폴백. 금액(쉼표 큰 수)을 수량으로
     착각하지 않도록 컬럼 순서를 명시한다.
@@ -322,7 +334,7 @@ def parse_purchase_table_llm(text: str, run_claude) -> list[dict]:
     prompt = (
         "다음은 붙여넣은 '비품 구매 표'인데 칸 구분이 깨져 글자가 붙어 있다. "
         "각 구매 항목을 정확히 분리해 JSON 배열로만 출력하라. "
-        "각 원소는 {\"품명\":문자열, \"수량\":정수, \"부서\":문자열}. "
+        "각 원소는 {\"품명\":문자열, \"수량\":정수, \"금액\":정수, \"부서\":문자열}. "
         "표의 컬럼 순서는 보통: 번호 · 품명 · 수량 · 금액 · 계좌/링크 · 출금계좌 · 부서. "
         "주의: *수량* 은 품명 바로 뒤의 작은 정수다. 쉼표가 들어간 큰 수(예: 179,250)는 "
         "금액이니 수량으로 쓰지 마라. '계좌/링크' 칸은 품명과 비슷하게 반복될 수 있다. "
@@ -345,8 +357,12 @@ def parse_purchase_table_llm(text: str, run_claude) -> list[dict]:
             qty = int(d.get('수량'))
         except (TypeError, ValueError):
             continue
+        try:
+            amount = int(str(d.get('금액', '0')).replace(',', ''))
+        except (TypeError, ValueError):
+            amount = 0
         if name and qty > 0:
-            rows.append({'품명': name, '수량': qty, '부서': (d.get('부서') or '').strip()})
+            rows.append({'품명': name, '수량': qty, '금액': amount, '부서': (d.get('부서') or '').strip()})
     return rows
 
 
