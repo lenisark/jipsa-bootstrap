@@ -59,5 +59,28 @@ class BuildTest(unittest.TestCase):
                                       {'X':{'용도':'사내비품','카테고리':'기타'}}, '2026-08-06', [], {})
         self.assertEqual(recs[0]['단가'], 0)
 
+class ApplyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_apply_uses_cache_and_writes(self):
+        import tempfile, json as _j, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d = _P(d)
+            tpl = d/'비품 주문 기록_202605.xlsx'
+            wb = openpyxl.Workbook(); ws=wb.active; ws.title='입력'
+            ws['A1']='비품 주문 기록 — 2026년 __5_월'; ws.append([]); ws.append([])
+            ws.append(['일자','부서','용도','카테고리','품목','수량','단가','금액','발주처','재구매주기','비고'])
+            wb.create_sheet('마스터'); wb.save(tpl); wb.close()
+            cache = d/'c.json'; cache.write_text(_j.dumps({'볼펜':{'용도':'사내비품','카테고리':'사무용품'}}), encoding='utf-8')
+            cfg = {'folder':str(d),'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx',
+                   'month_record_template':'비품 주문 기록_202605.xlsx','classify_cache':str(cache),
+                   'known_depts':['전부서 공통'],'dept_aliases':{}}
+            rows=[{'품명':'볼펜','수량':3,'금액':3000,'부서':'전부서'}]
+            def boom(p): raise AssertionError('캐시 적중인데 LLM 호출')
+            res = self.m.apply_purchase_record(cfg, rows, boom, '2026-08-06')
+            self.assertEqual(res['appended'], 1)
+            self.assertIsNone(res['error'])
+
 if __name__ == '__main__':
     unittest.main()

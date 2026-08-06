@@ -84,3 +84,31 @@ def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
                      '카테고리': cls['카테고리'], '품목': name, '수량': qty,
                      '단가': round(amt/qty) if qty > 0 else 0, '금액': amt})
     return recs, warns
+
+def _sibling(mod_file):
+    spec = importlib.util.spec_from_file_location(mod_file[:-3], Path(__file__).with_name(mod_file))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
+    pstore = _sibling('purchase_store.py')
+    folder = Path(cfg['folder'])
+    yyyymm = when_ymd[:7].replace('-', '')
+    month_path = folder / pstore.month_filename(cfg['month_record_pattern'], yyyymm)
+    tpl_path = folder / cfg['month_record_template']
+    if pstore.is_locked(month_path):
+        return {'appended': 0, 'records': [], 'warns': [], 'error': 'locked'}
+    cache_path = Path(cfg['classify_cache']).expanduser()
+    try:
+        cache = json.loads(cache_path.read_text(encoding='utf-8')) if cache_path.exists() else {}
+    except Exception:
+        cache = {}
+    names = [(r.get('품명') or '').strip() for r in rows if (r.get('품명') or '').strip()]
+    cmap, cache2 = classify_with_cache(names, cache, run_claude, cfg.get('guide_text',''))
+    recs, warns = build_records(rows, cmap, when_ymd,
+                                cfg.get('known_depts', []), cfg.get('dept_aliases', {}))
+    month_label = f'{int(yyyymm[4:6])}월'
+    n = pstore.append_month_records(month_path, tpl_path, recs, month_label)
+    if cache2 != cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache2, ensure_ascii=False, indent=2), encoding='utf-8')
+    return {'appended': n, 'records': recs, 'warns': warns, 'error': None}

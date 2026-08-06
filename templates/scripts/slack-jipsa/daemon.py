@@ -765,7 +765,8 @@ _inbound_wait: dict = {}   # (channel, user) -> 만료 epoch. `입고등록`만 
 
 
 def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
-    """구매표(body) 파싱 → 입고 반영 → 결과 게시. 처리했으면 True."""
+    """구매표(body) 파싱 → 구매기록/입고 반영 → 결과 게시. 처리했으면 True."""
+    pcfg = _load_purchase_cfg()
     rows = sply.parse_purchase_table(body)
     used_llm = False
     log(f'입고등록 처리: body_len={len(body)} 규칙파서={len(rows)}건')
@@ -778,6 +779,22 @@ def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
             "표를 못 읽었어요. 품명·수량이 있는 표를 붙여넣어 주세요.\n"
             "(엑셀/그룹웨어에서 복사해 붙여도 됩니다)"))
         return True
+    if pcfg and pcfg.get('mode') == 'purchase':
+        import purchase as pur
+        from datetime import datetime, timezone, timedelta
+        when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
+        res = pur.apply_purchase_record(pcfg, rows, lambda p: _supply_match_claude(p, cfg), when)
+        if res.get('error') == 'locked':
+            web.chat_postMessage(channel=channel, text='📕 월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+            return True
+        lines = [f'🧾 구매기록 {res["appended"]}건 저장 ({when[:7]})']
+        for r in res['records'][:20]:
+            lines.append(f"• {r['품목']} ×{r['수량']} — {r['금액']:,}원 [{r['부서']}/{r['카테고리']}]")
+        for w in res['warns'][:5]:
+            lines.append('⚠️ ' + w)
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+    # (레거시) 재고 모드
     res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
     hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
     _supply_reply(channel, res, header=hdr)
