@@ -65,3 +65,22 @@ def classify_with_cache(items, cache: dict, run_claude, guide_text: str = ''):
         cache.update(fresh)
     result = {i: cache[i] for i in dict.fromkeys(items) if i in cache}
     return result, cache
+
+REC_HEADERS = ['일자','부서','용도','카테고리','품목','수량','단가','금액']
+
+def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
+    recs, warns = [], []
+    for r in rows:
+        name = (r.get('품명') or '').strip()
+        if not name:
+            continue
+        qty = int(r.get('수량') or 0)
+        amt = int(r.get('금액') or 0)
+        dept, is_new = normalize_dept(r.get('부서',''), known_depts, dept_aliases)
+        if is_new and dept:
+            warns.append(f'신규 부서 후보: "{dept}" (마스터에 없음)')
+        cls = classify_map.get(name, {'용도':'사내비품','카테고리':'기타'})
+        recs.append({'일자': when_ymd, '부서': dept, '용도': cls['용도'],
+                     '카테고리': cls['카테고리'], '품목': name, '수량': qty,
+                     '단가': round(amt/qty) if qty > 0 else 0, '금액': amt})
+    return recs, warns

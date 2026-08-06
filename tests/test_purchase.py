@@ -38,5 +38,26 @@ class ClassifyTest(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(self.m.classify_items([], lambda p:'x'), {})
 
+class BuildTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_build_basic(self):
+        rows = [{'품명':'무선마우스','수량':2,'금액':99800,'부서':'재무회계'}]
+        cmap = {'무선마우스': {'용도':'사내비품','카테고리':'IT·전자'}}
+        recs, warns = self.m.build_records(rows, cmap, '2026-08-06', ['재무회계'], {})
+        r = recs[0]
+        self.assertEqual((r['품목'], r['수량'], r['금액'], r['단가']), ('무선마우스',2,99800,49900))
+        self.assertEqual((r['용도'], r['카테고리'], r['부서'], r['일자']),
+                         ('사내비품','IT·전자','재무회계','2026-08-06'))
+    def test_new_dept_warns(self):
+        rows=[{'품명':'볼펜','수량':1,'금액':1000,'부서':'미지의팀'}]
+        recs, warns = self.m.build_records(rows, {'볼펜':{'용도':'사내비품','카테고리':'사무용품'}},
+                                           '2026-08-06', ['인사총무'], {})
+        self.assertTrue(any('미지의팀' in w for w in warns))
+    def test_zero_qty_unitprice_zero(self):
+        recs,_ = self.m.build_records([{'품명':'X','수량':0,'금액':500,'부서':''}],
+                                      {'X':{'용도':'사내비품','카테고리':'기타'}}, '2026-08-06', [], {})
+        self.assertEqual(recs[0]['단가'], 0)
+
 if __name__ == '__main__':
     unittest.main()
