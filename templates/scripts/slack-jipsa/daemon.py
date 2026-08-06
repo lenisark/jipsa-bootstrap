@@ -48,6 +48,19 @@ try:
 except Exception:
     rmd = None
 
+# 작업 객체(Task Layer, jipsa 2.0). 로드 실패해도 채팅은 동작하도록 방어.
+try:
+    import tasks as tsk
+    tsk.init_db()
+except Exception:
+    tsk = None
+
+# 비품관리(jipsa supply). 설정 없으면 비활성.
+try:
+    import supply as sply
+except Exception:
+    sply = None
+
 SECRETS = Path.home() / '.claude/secrets/slack-jipsa.env'
 SESSIONS_DIR = Path.home() / '.claude/scripts/slack-jipsa/sessions'
 LOGS_DIR = Path.home() / '.claude/scripts/slack-jipsa/logs'
@@ -187,6 +200,25 @@ def _expand(p: str) -> str:
     return os.path.expanduser(p) if p else p
 
 
+# 런타임 오버라이드 (슬랙 `저장폴더` 명령으로 바뀐 add_dirs 등). channels.json 과 분리 보관.
+OVERRIDES_FILE = Path.home() / '.claude/scripts/slack-jipsa/channel_overrides.json'
+
+
+def _load_overrides() -> dict:
+    try:
+        if OVERRIDES_FILE.exists():
+            return json.loads(OVERRIDES_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_channel_override(channel: str, patch: dict) -> None:
+    d = _load_overrides()
+    d.setdefault(channel, {}).update(patch)
+    OVERRIDES_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def load_channels() -> dict[str, dict]:
     """channels.json 로드. 없거나 비면 legacy 단일 채널(opus/owner/홈)로 fallback."""
     default_cwd = str(Path.home() / '.claude/scripts/slack-jipsa')
@@ -203,7 +235,21 @@ def load_channels() -> dict[str, dict]:
                     'add_dirs': [_expand(d) for d in (cfg.get('add_dirs') or [])],
                     'disallowed_tools': list(cfg.get('disallowed_tools') or []),
                     'require_mention': bool(cfg.get('require_mention', False)),
+                    'mission': cfg.get('mission', ''),                       # 2.0: 페르소나
+                    'tasks_enabled': bool(cfg.get('tasks_enabled', False)),  # 2.0: 작업 객체
+                    'gate': cfg.get('gate') or {},                          # 2.0: 승인 게이트(비면 off)
+                    # 2.0: `저장폴더` 명령으로 설정 가능한 출력 폴더의 허용 상위 루트
+                    'output_roots': [_expand(d) for d in (cfg.get('output_roots') or [])],
+                    # 2.0: 기본 저장 위치(시스템 프롬프트로 주입). `저장폴더` 명령으로 갱신.
+                    'output_dir': _expand(cfg.get('output_dir') or ''),
                 }
+            # 런타임 오버라이드 병합 (슬랙에서 바꾼 add_dirs/output_dir — 재시작에도 유지)
+            for ch, patch in _load_overrides().items():
+                if ch in out and isinstance(patch, dict):
+                    if patch.get('add_dirs'):
+                        out[ch]['add_dirs'] = [_expand(d) for d in patch['add_dirs']]
+                    if patch.get('output_dir'):
+                        out[ch]['output_dir'] = _expand(patch['output_dir'])
             if out:
                 return out
             log('channels.json 비어있음 — legacy 단일 채널로 fallback')
@@ -211,7 +257,9 @@ def load_channels() -> dict[str, dict]:
             log(f'channels.json 파싱 실패 ({e}) — legacy 단일 채널로 fallback')
     return {CHANNEL: {'label': '개인 비서', 'model': 'opus', 'access': 'owner',
                       'cwd': default_cwd, 'add_dirs': [str(Path.home())],
-                      'disallowed_tools': []}}
+                      'disallowed_tools': [], 'mission': '',
+                      'tasks_enabled': False, 'gate': {}, 'output_roots': [],
+                      'output_dir': ''}}
 
 
 CHANNELS = load_channels()
@@ -252,16 +300,31 @@ SYSTEM_PROMPT = f"""당신은 {USER_NAME}님의 슬랙 집사 '{BOT_NAME}'입니
 def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
                 model: str = 'opus', cwd: str | None = None,
                 add_dirs: list[str] | None = None,
-                disallowed_tools: list[str] | None = None) -> subprocess.CompletedProcess:
+                disallowed_tools: list[str] | None = None,
+                gate: dict | None = None, gate_channel: str = '',
+                gate_thread: str = '', output_dir: str = '') -> subprocess.CompletedProcess:
     env = os.environ.copy()
-    env['CLAUDE_SKIP_HOOKS'] = '1'
+    if not gate:
+        env['CLAUDE_SKIP_HOOKS'] = '1'          # 기존 동작: 훅 전부 끔
+    else:
+        # 게이트 채널: PreToolUse 훅 켜고(.claude/settings.json) 게이트 컨텍스트 주입
+        env.pop('CLAUDE_SKIP_HOOKS', None)
+        env['JIPSA_GATE_CHANNEL'] = gate_channel or ''
+        env['JIPSA_GATE_THREAD'] = gate_thread or ''
+        env['JIPSA_GATE_APPROVERS'] = ','.join(gate.get('approvers', []))
+        env['JIPSA_GATE_TIMEOUT_MIN'] = str(gate.get('timeout_min', 15))
+        env['JIPSA_GATE_MODE'] = gate.get('mode', 'block')   # block(개인) | escalate(부서)
+    sysprompt = SYSTEM_PROMPT
+    if output_dir:
+        sysprompt += (f"\n\n[저장 위치] 이 채널에서 새로 만드는 파일은 특별한 경로 "
+                      f"지정이 없으면 `{output_dir}` 폴더 안에 저장하세요.")
     cmd = [
         'claude', '--print',
         '--permission-mode', 'bypassPermissions',
         '--dangerously-skip-permissions',
         '--output-format', 'text',
         '--model', model,
-        '--append-system-prompt', SYSTEM_PROMPT,
+        '--append-system-prompt', sysprompt,
     ]
     # 채널별 접근 허용 디렉토리. 비우면 cwd만 접근 가능(샌드박스).
     for d in (add_dirs or []):
@@ -276,7 +339,7 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
                           encoding='utf-8', env=env, cwd=run_cwd, timeout=timeout)
 
 
-def call_claude(prompt: str, channel: str, timeout: int = 900) -> str:
+def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = '') -> str:
     """클로드 코드 호출. resume 실패 시 자동으로 새 session 재시도."""
     sid, is_new = get_or_create_session(channel)
     cfg = CHANNELS.get(channel, {})
@@ -284,13 +347,26 @@ def call_claude(prompt: str, channel: str, timeout: int = 900) -> str:
     cwd = cfg.get('cwd')
     add_dirs = cfg.get('add_dirs')
     disallowed = cfg.get('disallowed_tools')
+    # 승인 게이트: 개인 차단(block) + 부서 권한상승(escalate) 둘 다 지원.
+    gate_cfg = cfg.get('gate') or {}
+    use_gate = bool(gate_cfg.get('enabled'))
+    gate_arg = gate_cfg if use_gate else None
+    # escalate: 평소 disallowed인 민감 도구를 풀어 호출 가능케 하되 게이트로 통제.
+    if use_gate and gate_cfg.get('mode') == 'escalate':
+        sensitive = set(gate_cfg.get('sensitive_tools') or [])
+        disallowed = [t for t in (disallowed or []) if t not in sensitive]
+    out_dir = cfg.get('output_dir', '')
     try:
-        r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed)
+        r = _run_claude(prompt, sid, is_new, timeout, model, cwd, add_dirs, disallowed,
+                        gate=gate_arg, gate_channel=channel, gate_thread=thread_ts,
+                        output_dir=out_dir)
         # resume 실패 (jsonl 없음) → 새 session으로 재시도
         if r.returncode != 0 and not is_new and 'No conversation found' in (r.stderr or ''):
             log(f'  resume fail, fallback to new session')
             new_sid = reset_session(channel)
-            r = _run_claude(prompt, new_sid, True, timeout, model, cwd, add_dirs, disallowed)
+            r = _run_claude(prompt, new_sid, True, timeout, model, cwd, add_dirs, disallowed,
+                            gate=gate_arg, gate_channel=channel, gate_thread=thread_ts,
+                            output_dir=out_dir)
     except subprocess.TimeoutExpired:
         return f'⏱️ 타임아웃 ({timeout}초). 작업이 너무 길어요.'
     if r.returncode != 0:
@@ -298,6 +374,135 @@ def call_claude(prompt: str, channel: str, timeout: int = 900) -> str:
         log(f'  claude fail rc={r.returncode}: {(r.stderr or "")[-300:]}')
         return '__SILENT_FAIL__'
     return (r.stdout or '').strip()
+
+
+# 스케줄 작업이 '채널 대화 요약' 의도인지 (그러면 히스토리 주입 필요)
+_CONV_SUMMARY = re.compile(r'(대화|채팅|채널|회의|스레드|메시지|논의).{0,8}(요약|정리|분석|브리핑|정리)')
+# '주간/지난주 요약' 의도인지 (그러면 최근 7일치를 정확히 수집)
+_WEEK_SUMMARY = re.compile(r'(지난\s*주|저번\s*주|한\s*주|일주일|이번\s*주|주간|최근\s*7\s*일|7일)')
+
+
+def _is_reply(m: dict) -> bool:
+    """스레드 답글이면 True (부모 메시지는 thread_ts == ts)."""
+    tt = m.get('thread_ts')
+    return bool(tt and tt != m.get('ts'))
+
+
+def _expand_with_replies(channel: str, messages: list) -> list:
+    """conversations_history 결과(최신순)를 과거→현재 순으로 뒤집고,
+    각 스레드 부모 뒤에 답글(replies)을 시간순으로 끼워넣어 평면화한 리스트 반환.
+
+    conversations.history는 top-level/부모 메시지만 주므로, 답글을 포함하려면
+    부모마다 conversations.replies를 별도 호출해야 한다(호출 수 = 답글 달린 부모 수).
+    """
+    out = []
+    for m in reversed(messages):          # 과거→현재
+        out.append(m)
+        rc = m.get('reply_count') or 0
+        ts = m.get('ts')
+        if rc and ts and m.get('thread_ts', ts) == ts:
+            try:
+                rr = web.conversations_replies(channel=channel, ts=ts, limit=200)
+            except Exception as e:
+                log(f'  replies fetch fail ({ts}): {e}')
+                continue
+            for rm in rr.get('messages', []):
+                if rm.get('ts') == ts:    # 첫 항목은 부모(중복) → 제외
+                    continue
+                out.append(rm)
+    return out
+
+
+def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None = None) -> str:
+    """채널 최근 메시지를 '[MM-DD HH:MM] 이름: 내용' 형식으로 수집(시각 포함).
+    스레드 답글은 부모 뒤에 시간순으로 '↳' 표시와 함께 포함.
+
+    since_days 지정 시: 최근 N일(오늘 기준 00:00 KST부터)을 페이지네이션으로 정확히 수집
+    (주간 요약용 — 최근 300개 한도에 걸려 앞부분이 잘리는 문제 방지)."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    kst = _tz(_td(hours=9))
+    try:
+        if since_days:
+            now = _dt.now(kst)
+            oldest_dt = (now - _td(days=since_days)).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            oldest = f'{oldest_dt.timestamp():.6f}'
+            raw = []
+            cursor = None
+            for _ in range(12):          # 최대 12페이지(≈2400건) 안전장치
+                kw = {'channel': channel, 'limit': 200, 'oldest': oldest}
+                if cursor:
+                    kw['cursor'] = cursor
+                resp = web.conversations_history(**kw)
+                raw.extend(resp.get('messages', []))
+                cursor = (resp.get('response_metadata') or {}).get('next_cursor')
+                if not cursor:
+                    break
+        else:
+            resp = web.conversations_history(channel=channel, limit=limit)
+            raw = resp.get('messages', [])
+    except Exception as e:
+        log(f'  history fetch fail: {e}')
+        return ''
+    lines = []
+    for m in _expand_with_replies(channel, raw):
+        if m.get('subtype') or m.get('user') == BOT:
+            continue
+        txt = (m.get('text') or '').strip()
+        if not txt:
+            continue
+        nm = _resolve_name(m.get('user') or m.get('bot_id') or '?')
+        mark = '↳ ' if _is_reply(m) else ''
+        try:
+            stamp = _dt.fromtimestamp(float(m.get('ts', '0')), kst).strftime('%m-%d %H:%M')
+            lines.append(f'[{stamp}] {mark}{nm}: {txt}')
+        except Exception:
+            lines.append(f'{mark}{nm}: {txt}')
+    cap = 20000 if since_days else 8000
+    return '\n'.join(lines)[-cap:]
+
+
+def run_scheduled_action(channel: str, prompt: str) -> str | None:
+    """알리미 2.0 실행기 — 스케줄된 작업을 새 세션으로 실행하고 결과 반환.
+
+    - 새 세션(대화 오염 방지) · 게이트 없음(스케줄은 알림 생성 시 사전승인된 것).
+    - 채널의 disallowed_tools 유지 → 부서 채널은 읽기전용(요약 등), 개인은 풀권한.
+    - '대화 요약' 의도면 채널 히스토리를 가져와 프롬프트에 주입(claude는 슬랙 접근 불가).
+    """
+    cfg = CHANNELS.get(channel, {})
+    effective = prompt
+    if _CONV_SUMMARY.search(prompt):
+        days = 7 if _WEEK_SUMMARY.search(prompt) else None
+        convo = _collect_channel_text(channel, since_days=days)
+        if convo:
+            effective = (
+                "다음은 이 슬랙 채널의 최근 대화 기록입니다(시각은 KST). "
+                "이를 근거로 아래 지시를 수행하세요. 기록에 없는 내용은 지어내지 마세요.\n\n"
+                f"[대화 기록]\n{convo}\n\n[지시]\n{prompt}")
+        else:
+            effective = (f"{prompt}\n\n"
+                         "(참고: 이 채널의 최근 대화 기록을 가져오지 못했습니다 — "
+                         "히스토리 읽기 권한이 없을 수 있어요. 그 사실만 간단히 보고하세요.)")
+    try:
+        r = _run_claude(effective, str(uuid.uuid4()), True, 600,
+                        cfg.get('model', 'opus'), cfg.get('cwd'),
+                        cfg.get('add_dirs'), cfg.get('disallowed_tools'),
+                        output_dir=cfg.get('output_dir', ''))
+    except Exception as e:
+        log(f'  scheduled action fail: {e}')
+        return None
+    if r.returncode != 0:
+        log(f'  scheduled action rc={r.returncode}: {(r.stderr or "")[-200:]}')
+        return None
+    out = (r.stdout or '').strip()
+    if not out:
+        return None
+    try:
+        sys.path.insert(0, str(Path.home() / '.claude/scripts'))
+        from lib.slack_mrkdwn import to_mrkdwn
+        return to_mrkdwn(out)
+    except Exception:
+        return out
 
 
 # ── 대화 요약 (팀 협업) ────────────────────────────────────────────
@@ -328,7 +533,7 @@ def summarize_channel(channel: str) -> str | None:
     except Exception as e:
         log(f'  summary history fail: {e}')
         return None
-    msgs = list(reversed(resp.get('messages', [])))
+    msgs = _expand_with_replies(channel, resp.get('messages', []))  # 과거→현재, 답글 포함
     lines = []
     for m in msgs:
         if m.get('subtype'):          # join/leave/bot_message 등 제외
@@ -339,13 +544,14 @@ def summarize_channel(channel: str) -> str | None:
         if not txt:
             continue
         nm = _resolve_name(m.get('user') or m.get('bot_id') or '?')
-        lines.append(f'{nm}: {txt}')
+        mark = '↳ ' if _is_reply(m) else ''  # 스레드 답글 표시
+        lines.append(f'{mark}{nm}: {txt}')
     convo = '\n'.join(lines)[-6000:]
     if not convo.strip():
         return '요약할 최근 대화가 없어요.'
     prompt = ("다음은 이 슬랙 채널의 최근 대화입니다. 핵심을 한국어 불릿으로 간결히 요약하세요. "
               "주요 논의·결정·할 일 위주로 5줄 이내. 사족 없이 요약만.\n\n" + convo)
-    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     try:
         r = _run_claude(prompt, str(uuid.uuid4()), True, 300,
@@ -429,6 +635,353 @@ def _tally_poll(channel: str) -> None:
     web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
 
 
+# ── 작업 객체 명령 (jipsa 2.0) ─────────────────────────────────────
+def _tasks_enabled(channel: str) -> bool:
+    return bool(tsk and CHANNELS.get(channel, {}).get('tasks_enabled'))
+
+
+def handle_task_command(channel: str, text: str) -> bool:
+    """작업 관련 슬랙 명령 처리. 처리했으면 True(=이후 claude 호출 skip)."""
+    if not _tasks_enabled(channel):
+        return False
+    t = text.strip()
+    if t in ('작업목록', '작업 목록'):
+        rows = tsk.list_tasks(channel, states=('대기', '진행', '막힘'))
+        if not rows:
+            web.chat_postMessage(channel=channel, text='열린 작업이 없어요.')
+            return True
+        lines = ['*📋 열린 작업*']
+        icon = {'대기': '🕒', '진행': '🔧', '막힘': '⛔'}
+        for r in rows:
+            lines.append(f"{icon.get(r['state'], '•')} `{r['id'][:8]}` {r['title']}  _({r['state']})_")
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+    m = re.match(r'^작업\s+([0-9a-f]{6,})\s+(진행|막힘|완료|취소)$', t)
+    if m:
+        prefix, state = m.group(1), m.group(2)
+        rows = [r for r in tsk.list_tasks(channel) if r['id'].startswith(prefix)]
+        if not rows:
+            web.chat_postMessage(channel=channel, text=f'`{prefix}` 작업을 못 찾았어요.')
+            return True
+        ok = tsk.set_state(rows[0]['id'], state)
+        if ok:
+            web.chat_postMessage(channel=channel,
+                                 text=f"`{rows[0]['id'][:8]}` → *{state}*", mrkdwn=True)
+        else:
+            web.chat_postMessage(channel=channel,
+                                 text=f"`{rows[0]['id'][:8]}` 는 현재 *{rows[0]['state']}* 라 *{state}* 로 못 바꿔요.",
+                                 mrkdwn=True)
+        return True
+    return False
+
+
+# ── 저장 폴더 변경 (jipsa 2.0, 소유자 전용 + 허용루트 제한) ─────────
+OUTPUT_DIR_TRIGGER = re.compile(r'^저장\s*폴더')
+
+
+def _under_roots(path: str, roots: list[str]) -> bool:
+    """path 가 허용 루트(roots) 중 하나의 하위인가? (심볼릭/대소문자/드라이브 안전)"""
+    rp = os.path.realpath(os.path.expanduser(path))
+    for r in roots:
+        rr = os.path.realpath(os.path.expanduser(r))
+        try:
+            if os.path.commonpath([rp, rr]) == rr:
+                return True
+        except ValueError:                      # 다른 드라이브(Windows) 등
+            continue
+    return False
+
+
+def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
+    """`저장폴더` / `저장폴더 <경로>` 처리. 처리했으면 True."""
+    t = text.strip()
+    if not OUTPUT_DIR_TRIGGER.match(t):
+        return False
+    cfg = CHANNELS.get(channel, {})
+    arg = OUTPUT_DIR_TRIGGER.sub('', t, count=1).strip().strip('"\'' )
+    if not arg:                                  # 현재 저장 폴더 표시
+        cur = cfg.get('add_dirs') or []
+        roots = cfg.get('output_roots') or []
+        msg = f"📁 현재 저장 폴더: {cur[0] if cur else '(샌드박스 — 작업폴더 내부만)'}"
+        if roots:
+            msg += f"\n변경(소유자만): `저장폴더 <경로>` · 허용 루트: {', '.join(roots)}"
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=msg)
+        return True
+    # 변경은 소유자만
+    if user != MIRI:
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='저장 폴더 변경은 소유자만 가능해요.')
+        except Exception:
+            pass
+        return True
+    roots = cfg.get('output_roots') or []
+    if not roots:
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            '이 채널은 저장 폴더 변경이 꺼져 있어요. '
+            '`channels.json` 의 `output_roots` 에 허용 폴더를 먼저 지정하세요.'))
+        return True
+    if not _under_roots(arg, roots):
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f"허용된 폴더 밖이에요. 허용 루트 하위로만 지정할 수 있어요:\n• " +
+            '\n• '.join(roots)))
+        return True
+    path = os.path.realpath(os.path.expanduser(arg))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        web.chat_postMessage(channel=channel, text=f'폴더를 만들지 못했어요: {e}')
+        return True
+    CHANNELS[channel]['add_dirs'] = [path]        # 핫리로드 (다음 호출부터 적용)
+    CHANNELS[channel]['output_dir'] = path        # 기본 저장 위치(시스템 프롬프트 주입)
+    _save_channel_override(channel, {'add_dirs': [path], 'output_dir': path})  # 재시작에도 유지
+    web.chat_postMessage(channel=channel, mrkdwn=True,
+                         text=f"✅ 저장 폴더를 `{path}` 로 바꿨어요. (즉시 적용)")
+    log(f'output dir set ch={channel} -> {path} by {user}')
+    return True
+
+
+# ── 비품관리 슬랙 명령 (jipsa 2.0 P2) ──────────────────────────────
+def _supply_match_claude(prompt: str, cfg: dict) -> str:
+    """품목 매칭/표파싱용 1회성 claude 호출(새 세션, 도구 없음)."""
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
+               'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
+    try:
+        r = _run_claude(prompt, str(uuid.uuid4()), True, 220, 'sonnet',
+                        cfg.get('cwd'), [], notools)
+        if r.returncode != 0:
+            log(f'  supply claude rc={r.returncode}: {(r.stderr or "")[-200:]}')
+            return ''
+        return r.stdout or ''
+    except subprocess.TimeoutExpired:
+        log('  supply claude TIMEOUT')
+        return ''
+    except Exception as e:
+        log(f'  supply claude exc: {e}')
+        return ''
+
+
+_inbound_wait: dict = {}   # (channel, user) -> 만료 epoch. `입고등록`만 보낸 뒤 표 대기.
+
+
+def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
+    """구매표(body) 파싱 → 구매기록/입고 반영 → 결과 게시. 처리했으면 True."""
+    pcfg = _load_purchase_cfg()
+    rows = sply.parse_purchase_table(body)
+    used_llm = False
+    log(f'입고등록 처리: body_len={len(body)} 규칙파서={len(rows)}건')
+    if not rows:                              # 칸 깨진 붙여넣기 → LLM 파싱 폴백
+        rows = sply.parse_purchase_table_llm(body, lambda p: _supply_match_claude(p, cfg))
+        used_llm = bool(rows)
+        log(f'  LLM 폴백 파싱={len(rows)}건')
+    if not rows:
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            "표를 못 읽었어요. 품명·수량이 있는 표를 붙여넣어 주세요.\n"
+            "(엑셀/그룹웨어에서 복사해 붙여도 됩니다)"))
+        return True
+    if pcfg and pcfg.get('mode') == 'purchase':
+        import purchase as pur
+        from datetime import datetime, timezone, timedelta
+        when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
+        res = pur.apply_purchase_record(pcfg, rows, lambda p: _supply_match_claude(p, cfg), when)
+        if res.get('error') == 'locked':
+            web.chat_postMessage(channel=channel, text='📕 월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+            return True
+        lines = [f'🧾 구매기록 {res["appended"]}건 저장 ({when[:7]})']
+        for r in res['records'][:20]:
+            lines.append(f"• {r['품목']} ×{r['수량']} — {r['금액']:,}원 [{r['부서']}/{r['카테고리']}]")
+        for w in res['warns'][:5]:
+            lines.append('⚠️ ' + w)
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+    # (레거시) 재고 모드
+    res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+    hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
+    _supply_reply(channel, res, header=hdr)
+    return True
+
+
+def _default_prev_yyyymm() -> str:
+    """지난달을 YYYYMM으로. KST 기준."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone(timedelta(hours=9)))
+    if rmd is not None:
+        y, mo = rmd._prev_month(now.year, now.month)
+    else:
+        y, mo = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    return f'{y:04d}{mo:02d}'
+
+
+def _post_merge_result(channel: str, res: dict, yyyymm: str) -> None:
+    """merge_month_into_analysis 결과를 채널에 게시."""
+    status = res.get('status')
+    month = res.get('month', '')
+    summary = res.get('summary') or {}
+    if status == 'locked':
+        web.chat_postMessage(channel=channel,
+            text='📕 분석/월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+        return
+    if status == 'nothing':
+        web.chat_postMessage(channel=channel, mrkdwn=True,
+            text=f'{month} 분석은 갱신할 내용이 없어요. (주문기록이 없거나 이미 반영됨)')
+        return
+    monsum = int((summary.get('월합') or {}).get(month, 0) or 0)
+    total = int(summary.get('총계', 0) or 0)
+    cnt = res.get('rows', summary.get('건수', 0))
+    if status == 'proposed':
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f'📊 *{month} 분석 갱신 제안*\n'
+            f'• 신규 {cnt}건 / {month} 합계 {monsum:,}원 / 전체 총계 {total:,}원\n'
+            f'확정하려면 `분석 갱신 확정 {yyyymm}`'))
+        return
+    if status == 'merged':
+        name = Path(res.get('out') or '').name
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            f'✅ *{month} 분석 반영 완료*\n'
+            f'• 신규 {cnt}건 / {month} 합계 {monsum:,}원 / 전체 총계 {total:,}원\n'
+            f'• 새 파일: `{name}`'))
+
+
+def _handle_analysis_refresh(channel: str, yyyymm, confirm: bool) -> None:
+    """`분석 갱신[ 확정] [YYYYMM]` 처리. confirm=False면 제안(dry_run), True면 실병합."""
+    pcfg = _load_purchase_cfg()
+    if not (pcfg and pcfg.get('mode') == 'purchase'):
+        return
+    import purchase as pur
+    from datetime import datetime, timezone, timedelta
+    when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
+    yyyymm = yyyymm or _default_prev_yyyymm()
+    try:
+        res = pur.merge_month_into_analysis(pcfg, yyyymm, when, dry_run=not confirm)
+    except Exception as e:
+        log(f'  분석 갱신 실패({yyyymm}): {e}')
+        web.chat_postMessage(channel=channel,
+            text='분석 갱신 중 오류가 났어요. 잠시 후 다시 시도하거나 로그를 확인해 주세요.')
+        return
+    _post_merge_result(channel, res, yyyymm)
+
+
+def handle_supply_command(channel: str, user: str, text: str) -> bool:
+    """비품 명령: 재고 / 재고 <품목> / 비품현황 / 입고 <품목> <수량> / 입고등록 <표>.
+    조회는 누구나, 입고(쓰기)는 담당자(managers + 소유자)만. 처리했으면 True."""
+    if sply is None:
+        return False
+    cfg = _load_supply_cfg()
+    if not cfg:
+        return False
+    t = text.strip()
+    first = t.split('\n', 1)[0].strip()
+    managers = set(cfg.get('managers', [])) | ({MIRI} if MIRI else set())
+    _pcfg_perm = _load_purchase_cfg()
+    if _pcfg_perm and _pcfg_perm.get('mode') == 'purchase':
+        managers |= set(_pcfg_perm.get('managers', []))
+    key = (channel, user)
+
+    # `입고등록`만 먼저 보낸 담당자가 이어서 표를 붙여넣은 경우 → 이 메시지를 표로 처리
+    if key in _inbound_wait:
+        if time.time() > _inbound_wait.get(key, 0):
+            _inbound_wait.pop(key, None)
+        elif first not in ('입고등록', '입고 등록', '재고', '비품현황', '재고현황') \
+                and not re.match(r'^(입고|재고|출고|실사)\s', first):
+            _inbound_wait.pop(key, None)
+            return _do_inbound_register(channel, t, cfg)
+
+    def deny():
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='입고 등록은 담당자만 할 수 있어요.')
+        except Exception:
+            pass
+        return True
+
+    # 분석 갱신[ 확정] [YYYYMM] — 구매기록 모드 전용, 담당자만
+    am = re.match(r'^분석\s*갱신(\s+확정)?(?:\s+(\d{6}))?$', first)
+    if am:
+        pcfg = _load_purchase_cfg()
+        if not (pcfg and pcfg.get('mode') == 'purchase'):
+            return False                     # 구매기록 모드 아니면 미처리
+        pmanagers = set(pcfg.get('managers', [])) | ({MIRI} if MIRI else set())
+        if user not in pmanagers:
+            return deny()
+        _handle_analysis_refresh(channel, am.group(2), bool(am.group(1)))
+        return True
+
+    # 비품현황 / 재고 전체
+    if first in ('비품현황', '재고현황', '재고'):
+        inv = sply.read_inventory(cfg)
+        if not inv:
+            web.chat_postMessage(channel=channel, text='등록된 비품 재고가 없어요.')
+            return True
+        low = [r for r in inv.values() if int(r['현재수량']) < int(r.get('최소수량', 0) or 0)]
+        lines = [f'📦 *비품 현황* (품목 {len(inv)}종)']
+        for r in sorted(inv.values(), key=lambda x: x['품목'])[:40]:
+            mark = ' ⚠️' if int(r['현재수량']) < int(r.get('최소수량', 0) or 0) else ''
+            lines.append(f"• {r['품목']}: *{r['현재수량']}*{(' '+r['단위']) if r.get('단위') else ''}{mark}")
+        if low:
+            lines.append('\n⚠️ 저재고: ' + ', '.join(r['품목'] for r in low))
+        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        return True
+
+    # 재고 <품목>
+    m = re.match(r'^재고\s+(.+)$', first)
+    if m:
+        q = m.group(1).strip()
+        inv = sply.read_inventory(cfg)
+        hits = [r for k, r in inv.items() if q.lower() in k.lower()]
+        if hits:
+            lines = ['📦 *재고 조회*'] + [
+                f"• {r['품목']}: *{r['현재수량']}*{(' '+r['단위']) if r.get('단위') else ''} "
+                f"(최소 {r.get('최소수량', 0)})" for r in hits[:15]]
+            web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        else:
+            web.chat_postMessage(channel=channel, text=f"'{q}' 품목을 재고표에서 못 찾았어요.")
+        return True
+
+    # 입고 <품목> <수량>  (단건, 담당자만 — 팩 표기 있으면 곱셈)
+    m = re.match(r'^입고\s+(.+?)\s+(\d+)$', first)
+    if m:
+        if user not in managers:
+            return deny()
+        rows = [{'품명': m.group(1).strip(), '수량': int(m.group(2)), '부서': ''}]
+        res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
+        _supply_reply(channel, res)
+        return True
+
+    # 출고 <품목> <수량> (차감) / 실사 <품목> <수량> (현재고를 그 값으로 설정). 담당자만.
+    m = re.match(r'^(출고|실사)\s+(.+?)\s+(\d+)$', first)
+    if m:
+        if user not in managers:
+            return deny()
+        mode, item, qty = m.group(1), m.group(2).strip(), int(m.group(3))
+        res = sply.apply_adjust(cfg, item, qty, mode, lambda p: _supply_match_claude(p, cfg))
+        _supply_reply(channel, res)
+        return True
+
+    # 입고등록 (담당자만). 표가 같은 메시지에 있으면 바로, 없으면 다음 메시지 대기.
+    if first in ('입고등록', '입고 등록'):
+        if user not in managers:
+            return deny()
+        body = t.split('\n', 1)[1] if '\n' in t else ''
+        if body.strip():
+            return _do_inbound_register(channel, body, cfg)
+        _inbound_wait[key] = time.time() + 180          # 3분 내 다음 메시지를 표로
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            "📥 이어서 *구매표를 붙여넣어* 주세요 (3분 내, 이 채널에).\n"
+            "엑셀/그룹웨어에서 복사해 붙여도 돼요. 품명·수량만 있으면 됩니다."))
+        return True
+
+    return False
+
+
+def _supply_reply(channel: str, res: dict, header: str = '') -> None:
+    if res.get('error') == 'locked':
+        web.chat_postMessage(channel=channel,
+                             text='⚠️ 비품 엑셀이 열려 있어요. 닫고 다시 시도해 주세요.')
+        return
+    lines = ([f'*{header}*'] if header else []) + (res.get('alerts') or ['처리할 내용이 없어요.'])
+    web.chat_postMessage(channel=channel, text='\n'.join(lines[:40]), mrkdwn=True)
+
+
 # ── 도움말 ─────────────────────────────────────────────────────────
 def handle_help(channel: str) -> None:
     p = '@집사 ' if CHANNELS.get(channel, {}).get('require_mention') else ''
@@ -447,6 +1000,12 @@ def handle_help(channel: str) -> None:
         f"*📝 요약*  `{p}오늘 대화 요약해줘`\n"
         f"*📚 FAQ*  `{p}연차 어떻게 신청해?`"
     )
+    if _tasks_enabled(channel):
+        text += (
+            "\n\n*📋 작업*\n"
+            f"• `{p}작업목록`  _(열린 작업 보기)_\n"
+            f"• `{p}작업 ab12cd34 진행|막힘|완료|취소`  _(상태 변경)_"
+        )
     web.chat_postMessage(channel=channel, text=text, mrkdwn=True)
 
 
@@ -557,10 +1116,53 @@ def notion_log_turn(channel: str, event_ts: str, user_text: str, reply_text: str
         log(f'  notion log fail: {e}')
 
 
+def _cell_text(node) -> str:
+    """리치텍스트 노드(셀)에서 모든 text를 이어붙여 추출."""
+    out = []
+
+    def walk(e):
+        if isinstance(e, dict):
+            if e.get('type') in ('text', 'raw_text'):   # 헤더=text, 데이터셀=raw_text
+                out.append(e.get('text', ''))
+            elif e.get('type') == 'link':
+                out.append(e.get('text') or e.get('url', ''))
+            for v in e.values():
+                if isinstance(v, (list, dict)):
+                    walk(v)
+        elif isinstance(e, list):
+            for x in e:
+                walk(x)
+    walk(node)
+    return ''.join(out).strip()
+
+
+def _extract_event_text(event: dict) -> str:
+    """event['text'] 우선. 비면 붙여넣은 표(attachments/blocks의 type=table)를
+    탭구분 텍스트로 변환해 반환(슬랙 리치 테이블 붙여넣기 대응)."""
+    txt = (event.get('text') or '').strip()
+    containers = []
+    for att in (event.get('attachments') or []):
+        containers += att.get('blocks') or []
+    containers += event.get('blocks') or []
+    lines = []
+    for b in containers:
+        if isinstance(b, dict) and b.get('type') == 'table':
+            for row in (b.get('rows') or []):
+                if isinstance(row, list):
+                    lines.append('\t'.join(_cell_text(c) for c in row))
+                elif isinstance(row, dict):           # 행이 dict 형태일 때
+                    cells = row.get('cells') or row.get('elements') or []
+                    lines.append('\t'.join(_cell_text(c) for c in cells))
+    table_txt = '\n'.join(ln for ln in lines if ln.strip())
+    if table_txt.strip():
+        return (txt + '\n' + table_txt).strip() if txt else table_txt
+    return txt
+
+
 def handle_message(event: dict) -> None:
     """사용자 메시지 처리 + (대화 채널이면) 다른 봇 메시지에도 반응."""
     global _dialog_self_turn_count
-    text = event.get('text', '').strip()
+    text = _extract_event_text(event)
     channel = event.get('channel', '')
     ts = event.get('ts', '')
     user = event.get('user', '')
@@ -585,6 +1187,14 @@ def handle_message(event: dict) -> None:
     access = ch_cfg.get('access', 'owner')
     if not is_dialog and access == 'owner' and not is_miri:
         return  # 개인 채널은 소유자만 응답
+
+    # 입고등록 표 대기 중인 담당자는 멘션 없이도 다음 메시지(표)를 이어받는다.
+    if not is_dialog and (channel, user) in _inbound_wait:
+        try:
+            if handle_supply_command(channel, user, text):
+                return
+        except Exception as e:
+            log(f'  supply wait err: {e}')
 
     # @멘션 게이트: require_mention 채널(부서 공용)은 봇이 멘션됐을 때만 응답
     if not is_dialog and ch_cfg.get('require_mention'):
@@ -635,6 +1245,27 @@ def handle_message(event: dict) -> None:
         new_sid = reset_session(channel)
         web.chat_postMessage(channel=channel, text=f'🔄 새 세션 시작 (`{new_sid[:8]}`)')
         return
+
+    # 저장 폴더 변경 명령 (소유자 전용). 처리되면 claude 호출 skip.
+    try:
+        if handle_output_dir_command(channel, user, text):
+            return
+    except Exception as e:
+        log(f'  output dir cmd err: {e}')
+
+    # 비품관리 명령 (재고/비품현황/입고/입고등록). 처리되면 claude 호출 skip.
+    try:
+        if handle_supply_command(channel, user, text):
+            return
+    except Exception as e:
+        log(f'  supply cmd err: {e}')
+
+    # 작업 객체 명령 (tasks_enabled 채널만). 처리되면 claude 호출 skip.
+    try:
+        if handle_task_command(channel, text):
+            return
+    except Exception as e:
+        log(f'  task cmd err: {e}')
 
     # 도움말
     if HELP_TRIGGER.search(text):
@@ -715,7 +1346,7 @@ def handle_message(event: dict) -> None:
         prompt_with_ctx = '\n'.join(ctx_lines)
 
     # 클로드 호출 (resume 실패 시 자동 fallback)
-    reply = call_claude(prompt_with_ctx, channel)
+    reply = call_claude(prompt_with_ctx, channel, thread_ts=thread_ts)
     log(f'  reply: {reply[:80]}')
 
     # 자기가 응답할 차례가 아니라 판단 → 시스템이 SKIP 출력 → post 안 함
@@ -776,9 +1407,82 @@ def handle_message(event: dict) -> None:
         log(f'  notion log thread fail: {e}')
 
 
+# ── 승인 게이트 버튼 (jipsa 2.0) ───────────────────────────────────
+def _audit_verdict(token: str, result: str, user: str, name: str) -> None:
+    """승인 verdict 감사 로그 — 노션 세션 DB에 적재(있으면). 없으면 skip."""
+    if not NOTION_SESSION_DB or tsk is None:
+        return
+    try:
+        import approval as apv
+        row = apv.get_approval(token) or {}
+        threading.Thread(target=notion_log_turn, args=(
+            row.get('channel_id', ''), f'gate:{token}',
+            f'승인요청: {row.get("action_desc", "")}',
+            f'{name}({user}) → {result}',
+            f'gate:{token}', 'gate'), daemon=True).start()
+    except Exception as e:
+        log(f'  audit fail: {e}')
+
+
+def handle_block_action(payload: dict) -> None:
+    """승인 게이트 버튼 클릭 처리. token=button value, 누른 사람 검증 후 verdict."""
+    if tsk is None:
+        return
+    try:
+        import approval as apv
+    except Exception as e:
+        log(f'  approval import fail: {e}')
+        return
+    user = (payload.get('user') or {}).get('id', '')
+    actions = payload.get('actions') or []
+    if not actions:
+        return
+    act = actions[0]
+    action_id = act.get('action_id', '')
+    token = act.get('value', '')
+    channel = (payload.get('channel') or {}).get('id', '')
+    msg_ts = (payload.get('message') or {}).get('ts', '')
+    if action_id not in ('gate_approve', 'gate_reject') or not token:
+        return
+    approve = (action_id == 'gate_approve')
+    result = apv.decide(token, user, approve=approve)
+    name = _resolve_name(user)
+    if result in ('승인', '거부'):
+        mark = '✅' if result == '승인' else '⛔'
+        done = f"{mark} {name}님이 *{result}* 했습니다."
+        try:  # 카드 메시지를 결과로 교체(버튼 제거)
+            web.chat_update(channel=channel, ts=msg_ts, text=done,
+                            blocks=[{'type': 'section',
+                                     'text': {'type': 'mrkdwn', 'text': done}}])
+        except Exception as e:
+            log(f'  card update fail: {e}')
+        log(f'gate {result} token={token[:8]} by={name}')
+        try:
+            _audit_verdict(token, result, user, name)
+        except Exception:
+            pass
+    elif result == '권한없음':
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text='이 승인 요청을 처리할 권한이 없어요.')
+        except Exception:
+            pass
+    else:  # 이미처리 / 만료 / 없음
+        try:
+            web.chat_postEphemeral(channel=channel, user=user,
+                                   text=f'이미 처리됐거나 만료된 요청이에요. ({result})')
+        except Exception:
+            pass
+
+
 def on_event(client: SocketModeClient, req: SocketModeRequest) -> None:
     # Slack에 즉시 ACK (3초 이내 필수)
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+    if req.type == 'interactive':
+        payload = req.payload or {}
+        if payload.get('type') == 'block_actions':
+            threading.Thread(target=handle_block_action, args=(payload,), daemon=True).start()
+        return
     if req.type != 'events_api': return
     event = req.payload.get('event', {})
     if event.get('type') == 'message' and not event.get('subtype'):
@@ -871,7 +1575,7 @@ def _handle_pin(channel: str, ts: str, user: str) -> None:
         return
     if not msg_text:
         return
-    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     prompt = ("다음 슬랙 메시지를 부서 위키 항목으로 정리하세요.\n"
               "출력 형식: 첫 줄 '### ' + 짧은 제목, 그 아래 핵심을 1~3개 불릿(`• `)으로.\n"
@@ -910,6 +1614,155 @@ def _handle_pin(channel: str, ts: str, user: str) -> None:
     log(f'pin saved ts={ts} -> {wiki}')
 
 
+SUPPLY_CONFIG_FILE = Path.home() / '.claude/scripts/slack-jipsa/supply.json'
+
+
+def _load_supply_cfg() -> dict | None:
+    if not SUPPLY_CONFIG_FILE.exists():
+        return None
+    try:
+        return json.loads(SUPPLY_CONFIG_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f'supply.json 파싱 실패: {e}')
+        return None
+
+
+PURCHASE_CONFIG_FILE = Path.home() / '.claude/scripts/slack-jipsa/purchase.json'
+
+
+def _load_purchase_cfg():
+    if not PURCHASE_CONFIG_FILE.exists():
+        return None
+    try:
+        cfg = json.loads(PURCHASE_CONFIG_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f'purchase.json 파싱 실패: {e}')
+        return None
+    if cfg.get('folder', '').startswith('~'):
+        cfg['folder'] = os.path.expanduser(cfg['folder'])
+    return cfg
+
+
+def _supply_poll_loop() -> None:
+    if sply is None:
+        return
+    cfg = _load_supply_cfg()
+    if not cfg:
+        log('supply.json 없음 — 비품관리 비활성')
+        return
+    notify = cfg.get('notify_channel', '')
+    dry = bool(cfg.get('dry_run', True))   # 기본 dry-run(안전)
+
+    def post(msg: str) -> None:
+        if notify:
+            try:
+                web.chat_postMessage(channel=notify, text=msg, mrkdwn=True)
+            except Exception as e:
+                log(f'  supply post fail: {e}')
+
+    def run_claude_for_match(prompt: str) -> str:
+        notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
+                   'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
+        try:
+            r = _run_claude(prompt, str(uuid.uuid4()), True, 120, 'sonnet',
+                            cfg.get('cwd'), [], notools)
+            return r.stdout or '' if r.returncode == 0 else ''
+        except Exception:
+            return ''
+
+    log(f'비품관리 폴링 시작 (every {cfg.get("poll_min",5)}분, dry_run={dry})')
+    while True:
+        try:
+            sply.sync_once(web, cfg, run_claude_for_match, post, dry_run=dry)
+        except Exception as e:
+            log(f'  supply sync err: {e}')
+        time.sleep(max(60, int(cfg.get('poll_min', 5)) * 60))
+
+
+def _gate_sweeper() -> None:
+    """주기적으로 만료된 승인 요청을 정리하고 막힌 task 요청자에게 알림."""
+    if tsk is None:
+        return
+    try:
+        import approval as apv
+    except Exception:
+        return
+    last = int(time.time())
+    while True:
+        time.sleep(30)
+        try:
+            n = apv.expire_stale()
+            if n:
+                for row in apv.list_expired_since(last):
+                    ch = row.get('channel_id'); th = row.get('thread_ts') or None
+                    try:
+                        web.chat_postMessage(channel=ch, thread_ts=th,
+                            text=f"⏱️ 승인 요청이 만료돼 *거부* 처리됐어요: {row.get('action_desc', '')[:120]}")
+                    except Exception:
+                        pass
+            last = int(time.time())
+        except Exception as e:
+            log(f'  sweeper err: {e}')
+
+
+PURCHASE_STATE_FILE = Path.home() / '.claude/scripts/slack-jipsa/purchase_state.json'
+
+
+def _load_purchase_state() -> dict:
+    try:
+        return json.loads(PURCHASE_STATE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_purchase_state(state: dict) -> None:
+    try:
+        PURCHASE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PURCHASE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                                       encoding='utf-8')
+    except Exception as e:
+        log(f'  purchase_state 저장 실패: {e}')
+
+
+def _purchase_monthly_loop(web) -> None:
+    """매월 schedule.day의 영업일 schedule.hour 이후 1회, 지난달 분석 제안(dry_run)을
+    cfg['channel']에 게시. purchase_state.json으로 월 1회 중복 방지. 실병합은 하지 않음."""
+    from datetime import datetime, timezone, timedelta, date as _date
+    KST = timezone(timedelta(hours=9))
+    log('월간 분석 자동 제안 스케줄러 시작')
+    while True:
+        try:
+            pcfg = _load_purchase_cfg()
+            sched = (pcfg or {}).get('schedule') or {}
+            if pcfg and pcfg.get('mode') == 'purchase' and sched.get('enabled'):
+                now = datetime.now(KST)
+                day = int(sched.get('day', 5)); hour = int(sched.get('hour', 10))
+                if rmd is not None:
+                    fire_date = rmd.effective_notify_date(now.year, now.month, day)
+                else:
+                    fire_date = _date(now.year, now.month, min(day, 28))
+                key = f'{now.year:04d}{now.month:02d}'
+                state = _load_purchase_state()
+                if (now.date() == fire_date and now.hour >= hour
+                        and state.get('last_fired') != key):
+                    yyyymm = _default_prev_yyyymm()
+                    when = now.strftime('%Y-%m-%d')
+                    channel = pcfg.get('channel', '')
+                    try:
+                        import purchase as pur
+                        res = pur.merge_month_into_analysis(pcfg, yyyymm, when, dry_run=True)
+                        if channel:
+                            _post_merge_result(channel, res, yyyymm)
+                        state['last_fired'] = key
+                        _save_purchase_state(state)
+                        log(f'월간 분석 제안 발송: {yyyymm} status={res.get("status")}')
+                    except Exception as e:
+                        log(f'  월간 분석 제안 실패: {e}')
+        except Exception as e:
+            log(f'  purchase monthly loop err: {e}')
+        time.sleep(1800)     # 30분마다 조건 점검
+
+
 def main() -> None:
     log(f'=== {BOT_NAME} daemon 시작 (channel={CHANNEL[:6]}.., bot={BOT}) ===')
     sock.socket_mode_request_listeners.append(on_event)
@@ -918,9 +1771,21 @@ def main() -> None:
     # 알리미 스케줄러 스레드 시작
     if rmd is not None:
         rmd.set_logger(log)
+        if hasattr(rmd, 'set_executor'):
+            rmd.set_executor(run_scheduled_action)   # 알리미 2.0: 능동 작업 실행기
         threading.Thread(target=rmd.reminder_loop, args=(web,), daemon=True).start()
     else:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
+    # 승인 게이트 만료 sweeper (jipsa 2.0)
+    threading.Thread(target=_gate_sweeper, daemon=True).start()
+    # 비품관리: 구매기록 모드면 재고 폴링/차감 비활성, 아니면 기존 폴링 시작
+    _pcfg = _load_purchase_cfg()
+    if _pcfg and _pcfg.get('mode') == 'purchase':
+        log('구매기록 모드 — 재고 폴링/차감 비활성')
+        if (_pcfg.get('schedule') or {}).get('enabled'):
+            threading.Thread(target=_purchase_monthly_loop, args=(web,), daemon=True).start()
+    else:
+        threading.Thread(target=_supply_poll_loop, daemon=True).start()
     # 무한 대기
     while True:
         time.sleep(60)

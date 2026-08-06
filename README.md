@@ -19,6 +19,10 @@
 | **5. 멀티채널 권한분리** | `channels.json`으로 채널별 모델·권한·샌드박스 분리 | ★ 핵심 |
 | **6. 개인 집사** | Opus · 홈 풀권한 · 본인 전용 | ★ |
 | **7. 부서 공용 집사** | Sonnet · 샌드박스 · @멘션 · 알리미/완료체크/투표/위키/요약/FAQ | ★ |
+| **8. 작업 객체** (2.0) | 휘발성 대화를 상태 가진 task로 승격(대기/진행/막힘/완료). 데몬 재시작에도 복구 | 선택 |
+| **9. 승인 게이트** (2.0) | 개인 채널 민감 도구 직전 슬랙 `[승인][거부]` 후 대기(block) + 부서 채널 권한상승 승인요청(escalate). 폰으로 원격 승인 | 선택 |
+| **10. 알리미 2.0** (2.0) | cron에 맞춰 집사가 직접 일하고 결과 보고 (예: 매일 어제 FAQ 요약 게시) | 선택 |
+| **11. 비품관리 (2.0)** | 슬랙 비품신청 리스트 수령완료 → 구글드라이브 재고 .xlsx 자동 차감 + 저재고 알림 | 선택 |
 
 ### 부서 집사 기능
 
@@ -57,7 +61,7 @@ Claude가 자동으로 OS 확인 → 깔 모듈 선택 → 슬랙 앱/토큰 안
 |------|------|------|
 | **Claude Code 구독** | $$ | 전체 |
 | **슬랙 워크스페이스** | 무료 | 채널 2개(개인·부서) |
-| **Python 3** + `slack_sdk` `holidays` | 무료 | 데몬 |
+| **Python 3** + `slack_sdk` `holidays` `openpyxl` | 무료 | 데몬 (`openpyxl`은 비품관리 모듈 11만) |
 | **OS** | — | Windows / macOS / Linux |
 
 > AI가 OS를 묻고 자동 분기합니다 (Windows=Task IÈ^vé^¯ãèÁêÒée, macOS=launchd, Linux=systemd).
@@ -82,6 +86,7 @@ Claude가 자동으로 OS 확인 → 깔 모듈 선택 → 슬랙 앱/토큰 안
 2. **검증된 코드 그대로** — `templates/` 안은 운영 환경에서 매일 도는 실코드. 결합은 `.env`·`channels.json`으로만
 3. **시크릿은 로컬에만** — 토큰은 `~/.claude/secrets/`, 채널ID는 `channels.json`(둘 다 git 제외)
 4. **부서 채널은 샌드박스** — 전용 폴더 밖 접근 차단 + 읽기/Q&A 전용으로 공용 안전성 확보
+5. **휘발성 대화 → 추적 가능한 작업** (2.0) — SQLite 작업 객체 위에 슬랙 버튼 승인 게이트를 얹어, 에이전트가 사람에게 먼저 보고·요청하는 양방향으로. 전부 로컬·슬랙 네이티브 (웹 대시보드 없음)
 
 ---
 
@@ -99,12 +104,16 @@ jipsa-bootstrap/
 │   ├── 04-notion-archive.md
 │   ├── 05-multichannel.md       ← channels.json 권한·모델 분리
 │   ├── 06-personal-jipsa.md     ← 개인 집사
-│   └── 07-team-jipsa.md         ← 부서 집사
+│   ├── 07-team-jipsa.md         ← 부서 집사
+│   ├── 08-task-layer.md         ← 작업 객체 (2.0)
+│   ├── 09-approval-gate.md      ← 승인 게이트 block+escalate (2.0)
+│   ├── 10-active-scheduler.md   ← 알리미 2.0 능동 실행 (2.0)
+│   └── 11-supply-inventory.md   ← 비품관리 재고 자동 차감 (2.0)
 └── templates/
     ├── lib/               ← 검증 라이브러리 (그대로 카피)
     ├── hooks/             ← Stop hook
     ├── scripts/
-    │   ├── slack-jipsa/   ← 멀티채널 daemon.py + reminders.py + channels.json.example + CLAUDE.md
+    │   ├── slack-jipsa/   ← daemon.py + reminders.py + tasks.py + approval.py + pretooluse_gate.py + supply.py + supply_store.py + .claude/settings.json.tmpl + channels.json.example + supply.json.example + CLAUDE.md
     │   └── slack-team/    ← 부서 작업폴더 (CLAUDE.md + docs/FAQ)
     ├── run.ps1.tmpl / run.sh.tmpl
     ├── win-task-*.xml.tmpl        ← Windows Task Scheduler

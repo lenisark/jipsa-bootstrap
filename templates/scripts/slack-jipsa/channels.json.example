@@ -4,7 +4,16 @@
     "model": "opus",
     "access": "owner",
     "cwd": "~/.claude/scripts/slack-jipsa",
-    "add_dirs": ["~"]
+    "add_dirs": ["~"],
+    "mission": "오롯이 내 개인 비서. 빌드/배포 보조.",
+    "tasks_enabled": true,
+    "gate": {
+      "enabled": false,
+      "sensitive_tools": ["Bash", "Write", "Edit"],
+      "approvers": ["U_OWNER_SLACK_ID"],
+      "timeout_min": 15,
+      "on_timeout": "deny"
+    }
   },
   "C_TEAM_CHANNEL_ID": {
     "label": "부서 공용 비서",
@@ -12,7 +21,19 @@
     "access": "all",
     "cwd": "~/.claude/scripts/slack-team",
     "add_dirs": [],
-    "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"],
-    "require_mention": true
+    "disallowed_tools": ["Bash", "Write", "Edit", "NotebookEdit"],
+    "require_mention": true,
+    "mission": "부서 공용 집사. 알리미/FAQ/투표/요약/온보딩.",
+    "tasks_enabled": true,
+    "output_roots": ["~/Documents/부서공유"],
+    "output_dir": "~/Documents/부서공유/집사 생성물",
+    "gate": {
+      "enabled": false,
+      "mode": "escalate",
+      "sensitive_tools": ["Write", "Edit"],
+      "approvers": ["U_HRADMIN_SLACK_ID"],
+      "timeout_min": 60,
+      "on_timeout": "deny"
+    }
   }
 }
