@@ -1628,8 +1628,12 @@ def main() -> None:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
     # 승인 게이트 만료 sweeper (jipsa 2.0)
     threading.Thread(target=_gate_sweeper, daemon=True).start()
-    # 비품관리 폴링 (supply.json 있을 때만 활성)
-    threading.Thread(target=_supply_poll_loop, daemon=True).start()
+    # 비품관리: 구매기록 모드면 재고 폴링/차감 비활성, 아니면 기존 폴링 시작
+    _pcfg = _load_purchase_cfg()
+    if _pcfg and _pcfg.get('mode') == 'purchase':
+        log('구매기록 모드 — 재고 폴링/차감 비활성')
+    else:
+        threading.Thread(target=_supply_poll_loop, daemon=True).start()
     # 무한 대기
     while True:
         time.sleep(60)
