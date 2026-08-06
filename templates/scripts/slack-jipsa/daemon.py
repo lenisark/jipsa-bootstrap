@@ -785,7 +785,7 @@ def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
         when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
         res = pur.apply_purchase_record(pcfg, rows, lambda p: _supply_match_claude(p, cfg), when)
         if res.get('error') == 'locked':
-            web.chat_postMessage(channel=channel, text='📕 월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+            web.chat_postMessage(channel=channel, text='📕 구매기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
             return True
         lines = [f'🧾 구매기록 {res["appended"]}건 저장 ({when[:7]})']
         for r in res['records'][:20]:
@@ -819,7 +819,7 @@ def _post_merge_result(channel: str, res: dict, yyyymm: str) -> None:
     summary = res.get('summary') or {}
     if status == 'locked':
         web.chat_postMessage(channel=channel,
-            text='📕 분석/월별기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+            text='📕 분석/구매기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
         return
     if status == 'nothing':
         web.chat_postMessage(channel=channel, mrkdwn=True,

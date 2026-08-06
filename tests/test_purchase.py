@@ -62,25 +62,35 @@ class BuildTest(unittest.TestCase):
 class ApplyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.m = load()
-    def test_apply_uses_cache_and_writes(self):
+    def test_apply_uses_cache_and_writes_log(self):
         import tempfile, json as _j, openpyxl
         from pathlib import Path as _P
         with tempfile.TemporaryDirectory() as d:
             d = _P(d)
-            tpl = d/'비품 주문 기록_202605.xlsx'
-            wb = openpyxl.Workbook(); ws=wb.active; ws.title='입력'
-            ws['A1']='비품 주문 기록 — 2026년 __5_월'; ws.append([]); ws.append([])
-            ws.append(['일자','부서','용도','카테고리','품목','수량','단가','금액','발주처','재구매주기','비고'])
-            wb.create_sheet('마스터'); wb.save(tpl); wb.close()
             cache = d/'c.json'; cache.write_text(_j.dumps({'볼펜':{'용도':'사내비품','카테고리':'사무용품'}}), encoding='utf-8')
-            cfg = {'folder':str(d),'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx',
-                   'month_record_template':'비품 주문 기록_202605.xlsx','classify_cache':str(cache),
+            cfg = {'folder':str(d),'purchase_log':'비품 구매기록_자동.xlsx','classify_cache':str(cache),
                    'known_depts':['전부서 공통'],'dept_aliases':{}}
             rows=[{'품명':'볼펜','수량':3,'금액':3000,'부서':'전부서'}]
             def boom(p): raise AssertionError('캐시 적중인데 LLM 호출')
             res = self.m.apply_purchase_record(cfg, rows, boom, '2026-08-06')
             self.assertEqual(res['appended'], 1)
             self.assertIsNone(res['error'])
+            r = res['records'][0]
+            self.assertEqual((r['월'], r['품목'], r['단가'], r['블록ID']), ('8월','볼펜',1000,'202608#1'))
+            wb = openpyxl.load_workbook(d/'비품 구매기록_자동.xlsx'); ws = wb.active
+            self.assertEqual(ws.cell(2, 6).value, '볼펜')       # 품목 = 6열, 데이터 r2
+            wb.close()
+    def test_blockid_seq_continues_same_month(self):
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            cfg = {'folder':str(d),'purchase_log':'log.xlsx','classify_cache':str(d/'c.json'),
+                   'known_depts':['전부서 공통'],'dept_aliases':{}}
+            def fake(p): return '[{"품목":"볼펜","용도":"사내비품","카테고리":"사무용품"}]'
+            self.m.apply_purchase_record(cfg, [{'품명':'볼펜','수량':1,'금액':1000,'부서':'전부서'}], fake, '2026-08-06')
+            res = self.m.apply_purchase_record(cfg, [{'품명':'볼펜','수량':1,'금액':1000,'부서':'전부서'}], fake, '2026-08-07')
+            self.assertEqual(res['records'][0]['블록ID'], '202608#2')   # 같은 달 seq 이어짐
 
 class PivotTest(unittest.TestCase):
     @classmethod
@@ -98,12 +108,13 @@ class PivotTest(unittest.TestCase):
 class ReflectTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.m = load()
-    def test_to_integrated(self):
-        inp=[{'일자':'2026-08-06','부서':'재무회계','용도':'사내비품','카테고리':'IT·전자',
-              '품목':'무선마우스','수량':2,'단가':49900,'금액':99800}]
-        out=self.m.month_records_to_integrated(inp,'8월','202608',1)
+    def test_log_to_integrated(self):
+        logs=[{'월':'8월','일자':'2026-08-06','부서':'재무회계','용도':'사내비품','카테고리':'IT·전자',
+               '품목':'무선마우스','수량':2,'단가':49900,'금액':99800,'블록ID':'202608#1'}]
+        out=self.m.log_rows_to_integrated(logs)
         self.assertEqual(out[0]['월'],'8월'); self.assertEqual(out[0]['금액'],99800)
         self.assertEqual(out[0]['일자'],'6일'); self.assertEqual(out[0]['블록ID'],'202608#1')
+        self.assertNotIn('수량', out[0])          # 통합원본엔 수량 없음
     def test_unreflected(self):
         integ=[{'월':'5월'}]
         self.assertTrue(self.m.unreflected_months(integ,'8월'))
@@ -123,12 +134,11 @@ class MergeOrchTest(unittest.TestCase):
         wb.save(path); wb.close()
 
     @staticmethod
-    def _make_month_file(path, input_rows):
+    def _make_log(path, log_rows):
         import openpyxl
-        wb=openpyxl.Workbook(); ws=wb.active; ws.title='입력'
-        ws['A1']='비품 주문 기록 — 2026년 __6_월'; ws.append([]); ws.append([])   # r1..r3
-        ws.append(['일자','부서','용도','카테고리','품목','수량','단가','금액','발주처','재구매주기','비고'])  # r4
-        for r in input_rows:
+        wb=openpyxl.Workbook(); ws=wb.active; ws.title='기록'
+        ws.append(['월','일자','부서','용도','카테고리','품목','수량','단가','금액','블록ID'])   # r1 헤더
+        for r in log_rows:
             ws.append(r)
         wb.save(path); wb.close()
 
@@ -140,11 +150,11 @@ class MergeOrchTest(unittest.TestCase):
             a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
             self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
             cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
-                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
             res=self.m.merge_month_into_analysis(cfg,'202605','2026-08-06',dry_run=True)
             self.assertEqual(res['status'],'nothing')     # 5월 이미 반영
 
-    def test_nothing_when_month_file_missing(self):
+    def test_nothing_when_log_missing(self):
         import tempfile
         from pathlib import Path as _P
         with tempfile.TemporaryDirectory() as d:
@@ -152,9 +162,23 @@ class MergeOrchTest(unittest.TestCase):
             a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
             self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
             cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
-                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
             res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=True)
-            self.assertEqual(res['status'],'nothing')     # 6월 파일 없음
+            self.assertEqual(res['status'],'nothing')     # 로그 파일 없음
+
+    def test_nothing_when_month_absent_in_log(self):
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
+            self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
+            self._make_log(d/'비품 구매기록_자동.xlsx',
+                [['7월','2026-07-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'202607#1']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
+            res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=True)
+            self.assertEqual(res['status'],'nothing')     # 로그에 6월 없음
 
     def test_proposed_no_write(self):
         import tempfile, openpyxl
@@ -163,10 +187,10 @@ class MergeOrchTest(unittest.TestCase):
             d=_P(d)
             a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
             self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
-            self._make_month_file(d/'비품 주문 기록_202606.xlsx',
-                [['2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'','','']])
+            self._make_log(d/'비품 구매기록_자동.xlsx',
+                [['6월','2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'202606#1']])
             cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
-                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
             before=sorted(p.name for p in d.iterdir())
             res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=True)
             self.assertEqual(res['status'],'proposed')
@@ -183,10 +207,10 @@ class MergeOrchTest(unittest.TestCase):
             a=d/'260501-HGA-비품주문분석-v1.2.xlsx'
             self._make_analysis(a, [['5월','6일','인사총무','사내비품','사무용품','볼펜',1000,'5월#1']])
             src_mtime=a.stat().st_mtime
-            self._make_month_file(d/'비품 주문 기록_202606.xlsx',
-                [['2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'','','']])
+            self._make_log(d/'비품 구매기록_자동.xlsx',
+                [['6월','2026-06-06','매입부','사내비품','IT·전자','마우스',1,50000,50000,'202606#1']])
             cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
-                 'month_record_pattern':'비품 주문 기록_{yyyymm}.xlsx','month_record_template':'x'}
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
             res=self.m.merge_month_into_analysis(cfg,'202606','2026-08-06',dry_run=False)
             self.assertEqual(res['status'],'merged')
             out=_P(res['out'])
