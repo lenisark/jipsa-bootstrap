@@ -154,6 +154,7 @@ def add_reminder(channel: str, user: str, spec: dict) -> dict:
         'freq': spec.get('freq', 'monthly'),
         'day': spec.get('day'),
         'weekday': spec.get('weekday'),
+        'weekdays': list(spec.get('weekdays') or []),
         'once_date': spec.get('once_date'),
         'lead_days': list(spec.get('lead_days') or []),
         'hour': int(spec['hour']),
@@ -220,7 +221,7 @@ def edit_reminder(channel: str, target: str, changes: dict):
                     break
         if victim is None:
             return None
-        for k in ('hour', 'minute', 'day', 'weekday', 'message'):
+        for k in ('hour', 'minute', 'day', 'weekday', 'weekdays', 'message'):
             if changes.get(k) is not None:
                 victim[k] = changes[k]
         save_reminders(items)
@@ -232,6 +233,51 @@ _MENTION = re.compile(r'<[@!][^>]+>')
 _WEEKDAYS = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
 _WEEKLY = re.compile(r'매주\s*([월화수목금토일])\s*요일?')
 _DAILY = re.compile(r'(매일같이|매일|날마다)')
+
+# 다중 요일 (평일/주말/범위/나열) — freq='weekdays'
+_WD_ORDER = '월화수목금토일'
+_WEEKDAY_PRESET = re.compile(r'(평일|주중)')
+_WEEKEND_PRESET = re.compile(r'주말')
+_WEEKDAY_RANGE = re.compile(r'([월화수목금토일])\s*요?일?\s*[~∼〜\-–—]\s*([월화수목금토일])\s*(?:요일)?')
+_WEEKDAY_LIST = re.compile(r'[월화수목금토일]요?일?(?:\s*[,，·/]\s*[월화수목금토일]요?일?)+\s*(?:요일)?')
+_WEEKDAY_CLUSTER = re.compile(r'매주\s*([월화수목금토일]{2,})\s*요일')
+
+
+def _parse_weekdays(text: str):
+    """다중 요일 파싱 → 요일 인덱스 리스트(0=월..6=일). 없으면 None.
+    지원: '평일'/'주중'(월~금), '주말'(토·일), '화~금'(범위),
+          '화,수,목,금'(나열), '매주 화수목금요일'(연속)."""
+    if _WEEKDAY_PRESET.search(text):
+        return [0, 1, 2, 3, 4]
+    if _WEEKEND_PRESET.search(text):
+        return [5, 6]
+    m = _WEEKDAY_RANGE.search(text)
+    if m:
+        a, b = _WD_ORDER.index(m.group(1)), _WD_ORDER.index(m.group(2))
+        if a < b:
+            return list(range(a, b + 1))
+    m = _WEEKDAY_LIST.search(text)
+    if m:
+        days = sorted({_WD_ORDER.index(c) for c in m.group(0) if c in _WD_ORDER})
+        if len(days) >= 2:
+            return days
+    m = _WEEKDAY_CLUSTER.search(text)
+    if m:
+        days = sorted({_WD_ORDER.index(c) for c in m.group(1)})
+        if len(days) >= 2:
+            return days
+    return None
+
+
+def _strip_weekday_tokens(s: str) -> str:
+    """메시지/지시문에서 요일 관련 토큰(평일/주말/범위/나열/연속/X요일) 제거."""
+    s = _WEEKDAY_PRESET.sub(' ', s)
+    s = _WEEKEND_PRESET.sub(' ', s)
+    s = _WEEKDAY_RANGE.sub(' ', s)
+    s = _WEEKDAY_LIST.sub(' ', s)
+    s = _WEEKDAY_CLUSTER.sub(' ', s)
+    s = re.sub(r'([월화수목금토일])\s*요일', ' ', s)
+    return s
 _DAY = re.compile(r'(?:매월|매달)\s*(\d{1,2})\s*일')
 _LAST_DAY = re.compile(r'(말일|마지막\s*날)')
 _ONCE_MD = re.compile(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일')      # 'N월 N일' (1회성). '매월'엔 숫자 없어 안 걸림
@@ -253,7 +299,7 @@ _TRIG = re.compile(
 _ACTION_VERB = re.compile(r'(요약|정리|분석|작성|조사|점검|집계|리포트|보고서|브리핑|확인)')
 _ACTION_POST = re.compile(r'(올려|올려줘|게시|공유|보고|브리핑|전해|작성해|알려\s*줘)')
 _ACTION_MARK = re.compile(r'자동')
-_SCHED_ANY = re.compile(r'(매월|매달|매주|매일|매월말|말일|날마다'
+_SCHED_ANY = re.compile(r'(매월|매달|매주|매일|매월말|말일|날마다|평일|주중|주말'
                         r'|\d{1,2}\s*월\s*\d{1,2}\s*일|오늘|내일|모레|글피)')
 
 
@@ -279,7 +325,7 @@ def _extract_action(text: str) -> str:
     s = _TIME_COLON.sub(' ', s)
     s = _TIME_HM.sub(' ', s)
     s = re.sub(r'(매월|매달|매주|매일|날마다|정오|자정|오늘|내일|모레|글피|하루\s*전|미리|자동)', ' ', s)
-    s = re.sub(r'([월화수목금토일])\s*요일', ' ', s)
+    s = _strip_weekday_tokens(s)
     s = re.sub(r'\s+', ' ', s).strip()
     return s.strip(' .,!~·-')
 
@@ -295,8 +341,9 @@ def _detect_action(text: str) -> str:
         return 'edit'
     if re.search(r'(목록|리스트|뭐\s*있|뭐가\s*있|등록된|어떤\s*알림)', text):
         return 'list'
-    if (_WEEKLY.search(text) or _DAILY.search(text) or _DAY.search(text)
-            or _LAST_DAY.search(text) or _ONCE_MD.search(text) or _ONCE_REL.search(text)):
+    if (_parse_weekdays(text) or _WEEKLY.search(text) or _DAILY.search(text)
+            or _DAY.search(text) or _LAST_DAY.search(text)
+            or _ONCE_MD.search(text) or _ONCE_REL.search(text)):
         return 'add'
     return 'unknown'
 
@@ -361,7 +408,7 @@ def _extract_message(text: str) -> str:
     msg = _TIME_COLON.sub(' ', msg)
     msg = _TIME_HM.sub(' ', msg)
     msg = re.sub(r'(매월|매달|매주|매일|날마다|정오|자정|오늘|내일|모레|글피|하루\s*전|미리)', ' ', msg)
-    msg = re.sub(r'([월화수목금토일])\s*요일', ' ', msg)
+    msg = _strip_weekday_tokens(msg)
     msg = re.sub(r'[,，]', ' ', msg)
     msg = re.sub(r'\s+', ' ', msg).strip()
     # 단독 조사 토큰만 제거 (단어 속 글자는 안 건드림: '함께'의 '께' 등 보존)
@@ -391,7 +438,11 @@ def parse_intent(text: str) -> dict:
             base['action'] = _extract_action(text)
             if not base['message']:
                 base['message'] = (base['action'] or '')[:40]
-        # 주기 판별 (우선순위: 매주 > 매일 > 매월 > 1회성)
+        # 주기 판별 (우선순위: 다중요일 > 매주 > 매일 > 매월 > 1회성)
+        wds = _parse_weekdays(text)
+        if wds:
+            base.update(freq='weekdays', weekdays=wds)
+            return base
         mw = _WEEKLY.search(text)
         if mw:
             base.update(freq='weekly', weekday=_WEEKDAYS[mw.group(1)])
@@ -423,6 +474,9 @@ def parse_intent(text: str) -> dict:
         md = _DAY.search(text) or re.search(r'(\d{1,2})\s*일', text)
         if md:
             changes['day'] = int(md.group(1))
+        wds = _parse_weekdays(text)
+        if wds:
+            changes['weekdays'] = wds
         mw = _WEEKLY.search(text)
         if mw:
             changes['weekday'] = _WEEKDAYS[mw.group(1)]
@@ -447,6 +501,15 @@ def _describe(r: dict) -> str:
     t = _fmt_time(r['hour'], r.get('minute', 0))
     if freq == 'daily':
         return f'매일 {t}'
+    if freq == 'weekdays':
+        wds = sorted(r.get('weekdays') or [])
+        if wds == [0, 1, 2, 3, 4]:
+            label = '평일'
+        elif wds == [5, 6]:
+            label = '주말'
+        else:
+            label = ''.join('월화수목금토일'[d] for d in wds) + '요일'
+        return f'매주 {label} {t}'
     if freq == 'weekly':
         wd = '월화수목금토일'[int(r.get('weekday', 0))]
         return f'매주 {wd}요일 {t}'
@@ -506,6 +569,8 @@ def handle(web, channel: str, user: str, text: str, ts: str) -> None:
                 "알림 명령을 이해 못했어요. 예)\n"
                 "• `매월 25일 10시에 정산 알려줘`\n"
                 "• `매주 월요일 9시에 주간회의 알려줘`\n"
+                "• `평일 9시에 일일보고 알려줘` (월~금)\n"
+                "• `매주 화~금 9시에 어제 요약 알려줘` (특정 요일)\n"
                 "• `매일 18시에 일일보고 알려줘`\n"
                 "• `6월 20일 14시에 워크숍 알려줘` (1회)\n"
                 "• `알림 목록` · `2번 알림 삭제`"))
@@ -534,6 +599,9 @@ def _handle_add(web, channel, user, intent) -> None:
     elif freq == 'weekly':
         if intent.get('weekday') is None:
             err = True
+    elif freq == 'weekdays':
+        if not intent.get('weekdays'):
+            err = True
     elif freq == 'daily':
         pass  # 추가 검증 불필요 — hour/msg 는 위에서 확인됨 (기존 버그: daily 누락 → else로 빠져 항상 err)
     elif freq == 'once':
@@ -553,6 +621,8 @@ def _handle_add(web, channel, user, intent) -> None:
             "알림 등록 정보를 이해 못했어요. 예)\n"
             "• `매월 25일 10시에 정산 알려줘`\n"
             "• `매주 월요일 9시에 회의 알려줘`\n"
+            "• `평일 9시에 일일보고 알려줘` (월~금)\n"
+            "• `매주 화~금 9시에 어제 요약 알려줘` (특정 요일)\n"
             "• `매일 18시에 일일보고 알려줘`\n"
             "• `6월 20일 14시에 워크숍 알려줘`"))
         return
@@ -713,6 +783,10 @@ def _due_today(r: dict, today: date):
     freq = r.get('freq', 'monthly')
     if freq == 'daily':
         return (today, today)
+    if freq == 'weekdays':
+        if today.weekday() in set(r.get('weekdays') or []):
+            return (today, today)
+        return None
     if freq == 'weekly':
         if today.weekday() == int(r.get('weekday', 0)):
             return (today, today)
@@ -753,7 +827,7 @@ def _occurrence_effs(r: dict, today: date):
 def _fire_kind_today(r: dict, today: date):
     """오늘 발사 대상 (kind, target, eff, days_before). kind='main'|'lead'. 없으면 None.
     daily·weekly 는 main만, monthly·once 는 main + 사전알림(lead_days)."""
-    if r.get('freq', 'monthly') in ('daily', 'weekly'):
+    if r.get('freq', 'monthly') in ('daily', 'weekly', 'weekdays'):
         due = _due_today(r, today)
         return ('main', due[0], due[1], 0) if due else None
     leads = sorted({int(x) for x in (r.get('lead_days') or [])}, reverse=True)

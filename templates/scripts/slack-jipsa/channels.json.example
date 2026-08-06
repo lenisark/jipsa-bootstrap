@@ -21,7 +21,7 @@
     "access": "all",
     "cwd": "~/.claude/scripts/slack-team",
     "add_dirs": [],
-    "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"],
+    "disallowed_tools": ["Bash", "Write", "Edit", "NotebookEdit"],
     "require_mention": true,
     "mission": "부서 공용 집사. 알리미/FAQ/투표/요약/온보딩.",
     "tasks_enabled": true,

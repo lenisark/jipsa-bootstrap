@@ -378,31 +378,88 @@ def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = 
 
 # 스케줄 작업이 '채널 대화 요약' 의도인지 (그러면 히스토리 주입 필요)
 _CONV_SUMMARY = re.compile(r'(대화|채팅|채널|회의|스레드|메시지|논의).{0,8}(요약|정리|분석|브리핑|정리)')
+# '주간/지난주 요약' 의도인지 (그러면 최근 7일치를 정확히 수집)
+_WEEK_SUMMARY = re.compile(r'(지난\s*주|저번\s*주|한\s*주|일주일|이번\s*주|주간|최근\s*7\s*일|7일)')
 
 
-def _collect_channel_text(channel: str, limit: int = 300) -> str:
-    """채널 최근 메시지를 '[MM-DD HH:MM] 이름: 내용' 형식으로 수집(시각 포함)."""
+def _is_reply(m: dict) -> bool:
+    """스레드 답글이면 True (부모 메시지는 thread_ts == ts)."""
+    tt = m.get('thread_ts')
+    return bool(tt and tt != m.get('ts'))
+
+
+def _expand_with_replies(channel: str, messages: list) -> list:
+    """conversations_history 결과(최신순)를 과거→현재 순으로 뒤집고,
+    각 스레드 부모 뒤에 답글(replies)을 시간순으로 끼워넣어 평면화한 리스트 반환.
+
+    conversations.history는 top-level/부모 메시지만 주므로, 답글을 포함하려면
+    부모마다 conversations.replies를 별도 호출해야 한다(호출 수 = 답글 달린 부모 수).
+    """
+    out = []
+    for m in reversed(messages):          # 과거→현재
+        out.append(m)
+        rc = m.get('reply_count') or 0
+        ts = m.get('ts')
+        if rc and ts and m.get('thread_ts', ts) == ts:
+            try:
+                rr = web.conversations_replies(channel=channel, ts=ts, limit=200)
+            except Exception as e:
+                log(f'  replies fetch fail ({ts}): {e}')
+                continue
+            for rm in rr.get('messages', []):
+                if rm.get('ts') == ts:    # 첫 항목은 부모(중복) → 제외
+                    continue
+                out.append(rm)
+    return out
+
+
+def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None = None) -> str:
+    """채널 최근 메시지를 '[MM-DD HH:MM] 이름: 내용' 형식으로 수집(시각 포함).
+    스레드 답글은 부모 뒤에 시간순으로 '↳' 표시와 함께 포함.
+
+    since_days 지정 시: 최근 N일(오늘 기준 00:00 KST부터)을 페이지네이션으로 정확히 수집
+    (주간 요약용 — 최근 300개 한도에 걸려 앞부분이 잘리는 문제 방지)."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    kst = _tz(_td(hours=9))
     try:
-        resp = web.conversations_history(channel=channel, limit=limit)
+        if since_days:
+            now = _dt.now(kst)
+            oldest_dt = (now - _td(days=since_days)).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            oldest = f'{oldest_dt.timestamp():.6f}'
+            raw = []
+            cursor = None
+            for _ in range(12):          # 최대 12페이지(≈2400건) 안전장치
+                kw = {'channel': channel, 'limit': 200, 'oldest': oldest}
+                if cursor:
+                    kw['cursor'] = cursor
+                resp = web.conversations_history(**kw)
+                raw.extend(resp.get('messages', []))
+                cursor = (resp.get('response_metadata') or {}).get('next_cursor')
+                if not cursor:
+                    break
+        else:
+            resp = web.conversations_history(channel=channel, limit=limit)
+            raw = resp.get('messages', [])
     except Exception as e:
         log(f'  history fetch fail: {e}')
         return ''
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-    kst = _tz(_td(hours=9))
     lines = []
-    for m in reversed(resp.get('messages', [])):
+    for m in _expand_with_replies(channel, raw):
         if m.get('subtype') or m.get('user') == BOT:
             continue
         txt = (m.get('text') or '').strip()
         if not txt:
             continue
         nm = _resolve_name(m.get('user') or m.get('bot_id') or '?')
+        mark = '↳ ' if _is_reply(m) else ''
         try:
             stamp = _dt.fromtimestamp(float(m.get('ts', '0')), kst).strftime('%m-%d %H:%M')
-            lines.append(f'[{stamp}] {nm}: {txt}')
+            lines.append(f'[{stamp}] {mark}{nm}: {txt}')
         except Exception:
-            lines.append(f'{nm}: {txt}')
-    return '\n'.join(lines)[-8000:]
+            lines.append(f'{mark}{nm}: {txt}')
+    cap = 20000 if since_days else 8000
+    return '\n'.join(lines)[-cap:]
 
 
 def run_scheduled_action(channel: str, prompt: str) -> str | None:
@@ -415,7 +472,8 @@ def run_scheduled_action(channel: str, prompt: str) -> str | None:
     cfg = CHANNELS.get(channel, {})
     effective = prompt
     if _CONV_SUMMARY.search(prompt):
-        convo = _collect_channel_text(channel)
+        days = 7 if _WEEK_SUMMARY.search(prompt) else None
+        convo = _collect_channel_text(channel, since_days=days)
         if convo:
             effective = (
                 "다음은 이 슬랙 채널의 최근 대화 기록입니다(시각은 KST). "
@@ -475,7 +533,7 @@ def summarize_channel(channel: str) -> str | None:
     except Exception as e:
         log(f'  summary history fail: {e}')
         return None
-    msgs = list(reversed(resp.get('messages', [])))
+    msgs = _expand_with_replies(channel, resp.get('messages', []))  # 과거→현재, 답글 포함
     lines = []
     for m in msgs:
         if m.get('subtype'):          # join/leave/bot_message 등 제외
@@ -486,13 +544,14 @@ def summarize_channel(channel: str) -> str | None:
         if not txt:
             continue
         nm = _resolve_name(m.get('user') or m.get('bot_id') or '?')
-        lines.append(f'{nm}: {txt}')
+        mark = '↳ ' if _is_reply(m) else ''  # 스레드 답글 표시
+        lines.append(f'{mark}{nm}: {txt}')
     convo = '\n'.join(lines)[-6000:]
     if not convo.strip():
         return '요약할 최근 대화가 없어요.'
     prompt = ("다음은 이 슬랙 채널의 최근 대화입니다. 핵심을 한국어 불릿으로 간결히 요약하세요. "
               "주요 논의·결정·할 일 위주로 5줄 이내. 사족 없이 요약만.\n\n" + convo)
-    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     try:
         r = _run_claude(prompt, str(uuid.uuid4()), True, 300,
@@ -685,7 +744,7 @@ def handle_output_dir_command(channel: str, user: str, text: str) -> bool:
 # ── 비품관리 슬랙 명령 (jipsa 2.0 P2) ──────────────────────────────
 def _supply_match_claude(prompt: str, cfg: dict) -> str:
     """품목 매칭/표파싱용 1회성 claude 호출(새 세션, 도구 없음)."""
-    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     try:
         r = _run_claude(prompt, str(uuid.uuid4()), True, 220, 'sonnet',
@@ -1424,7 +1483,7 @@ def _handle_pin(channel: str, ts: str, user: str) -> None:
         return
     if not msg_text:
         return
-    notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
     prompt = ("다음 슬랙 메시지를 부서 위키 항목으로 정리하세요.\n"
               "출력 형식: 첫 줄 '### ' + 짧은 제목, 그 아래 핵심을 1~3개 불릿(`• `)으로.\n"
@@ -1494,7 +1553,7 @@ def _supply_poll_loop() -> None:
                 log(f'  supply post fail: {e}')
 
     def run_claude_for_match(prompt: str) -> str:
-        notools = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+        notools = ['Bash', 'Write', 'Edit', 'NotebookEdit',
                    'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task']
         try:
             r = _run_claude(prompt, str(uuid.uuid4()), True, 120, 'sonnet',
