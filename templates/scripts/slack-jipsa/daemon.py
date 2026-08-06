@@ -1535,6 +1535,22 @@ def _load_supply_cfg() -> dict | None:
         return None
 
 
+PURCHASE_CONFIG_FILE = Path.home() / '.claude/scripts/slack-jipsa/purchase.json'
+
+
+def _load_purchase_cfg():
+    if not PURCHASE_CONFIG_FILE.exists():
+        return None
+    try:
+        cfg = json.loads(PURCHASE_CONFIG_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f'purchase.json 파싱 실패: {e}')
+        return None
+    if cfg.get('folder', '').startswith('~'):
+        cfg['folder'] = os.path.expanduser(cfg['folder'])
+    return cfg
+
+
 def _supply_poll_loop() -> None:
     if sply is None:
         return

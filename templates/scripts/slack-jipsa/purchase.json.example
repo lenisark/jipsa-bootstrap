@@ -1,0 +1,13 @@
+{
+  "mode": "purchase",
+  "channel": "C0AGPKSSR8A",
+  "folder": "G:/공유 드라이브/인사총무팀_일반/05_총무 영역/비품·고정비",
+  "dept_code": "HGA",
+  "month_record_pattern": "비품 주문 기록_{yyyymm}.xlsx",
+  "month_record_template": "비품 주문 기록_202605.xlsx",
+  "analysis_prefix": "비품주문분석",
+  "classify_cache": "~/.claude/scripts/slack-jipsa/supply_classify.json",
+  "managers": ["U0ANN3GJRDE"],
+  "schedule": { "enabled": true, "day": 5, "hour": 10 },
+  "dry_run": true
+}
