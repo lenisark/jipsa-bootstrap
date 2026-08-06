@@ -21,3 +21,47 @@ def normalize_dept(raw: str, known: list[str], aliases: dict) -> tuple[str, bool
         if nr and (nr in nk or nk in nr):
             return k, False
     return raw, True
+
+CATEGORIES = ['사무용품','다과·음료','청소·위생','IT·전자','비품·가구','기타']
+USES = ['사내비품','공용(사내·외부 혼재)','재판매·대고객']
+
+def classify_items(items: list[str], run_claude, guide_text: str = '') -> dict:
+    items = [i for i in dict.fromkeys(items) if i]     # 중복 제거·순서 보존
+    if not items:
+        return {}
+    prompt = (
+        "다음 비품 품목들을 각각 '용도'와 '카테고리'로 분류해 JSON 배열로만 출력하라.\n"
+        f"카테고리(택1): {', '.join(CATEGORIES)}\n"
+        f"용도(택1): {', '.join(USES)}. 기본값은 '사내비품'.\n"
+        + (f"분류 가이드:\n{guide_text}\n" if guide_text else "")
+        + '각 원소는 {"품목":문자열,"용도":문자열,"카테고리":문자열}. JSON 외 출력 금지.\n\n'
+        + '품목:\n' + '\n'.join(f'- {i}' for i in items))
+    out = (run_claude(prompt) or '').strip()
+    m = re.search(r'\[.*\]', out, re.S)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return {}
+    res = {}
+    for d in data:
+        if not isinstance(d, dict):
+            continue
+        name = (d.get('품목') or '').strip()
+        cat = (d.get('카테고리') or '').strip()
+        use = (d.get('용도') or '').strip()
+        if not name:
+            continue
+        res[name] = {'용도': use if use in USES else '사내비품',
+                     '카테고리': cat if cat in CATEGORIES else '기타'}
+    return res
+
+def classify_with_cache(items, cache: dict, run_claude, guide_text: str = ''):
+    cache = dict(cache)
+    misses = [i for i in dict.fromkeys(items) if i and i not in cache]
+    if misses:
+        fresh = classify_items(misses, run_claude, guide_text)
+        cache.update(fresh)
+    result = {i: cache[i] for i in dict.fromkeys(items) if i in cache}
+    return result, cache
