@@ -85,6 +85,27 @@ def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
                      '단가': round(amt/qty) if qty > 0 else 0, '금액': amt})
     return recs, warns
 
+def _amt(v):
+    try: return int(float(str(v).replace(',', '')))
+    except (TypeError, ValueError): return 0
+
+def compute_pivots(rows) -> dict:
+    from collections import defaultdict
+    dm = defaultdict(int); cm = defaultdict(int); um = defaultdict(int)
+    du = defaultdict(int); dc = defaultdict(int); mo = defaultdict(int)
+    items = []; total = 0
+    for r in rows:
+        a = _amt(r.get('금액'))
+        dep, mon = r.get('부서',''), r.get('월','')
+        use, cat = r.get('용도',''), r.get('카테고리','')
+        dm[(dep,mon)] += a; cm[(cat,mon)] += a; um[(use,mon)] += a
+        du[(dep,use)] += a; dc[(dep,cat)] += a; mo[mon] += a; total += a
+        items.append((a, r.get('품목',''), dep, mon))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return {'부서월':dict(dm),'카테고리월':dict(cm),'용도월':dict(um),
+            '부서용도':dict(du),'부서카테고리':dict(dc),'월합':dict(mo),
+            'top20':items[:20],'총계':total}
+
 def _sibling(mod_file):
     spec = importlib.util.spec_from_file_location(mod_file[:-3], Path(__file__).with_name(mod_file))
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m

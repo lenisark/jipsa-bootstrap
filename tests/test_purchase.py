@@ -82,5 +82,18 @@ class ApplyTest(unittest.TestCase):
             self.assertEqual(res['appended'], 1)
             self.assertIsNone(res['error'])
 
+class PivotTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_pivots(self):
+        rows=[{'월':'1월','부서':'인사총무','용도':'사내비품','카테고리':'사무용품','품목':'볼펜','금액':1000},
+              {'월':'1월','부서':'인사총무','용도':'사내비품','카테고리':'사무용품','품목':'A4','금액':2000},
+              {'월':'2월','부서':'매입부','용도':'공용(사내·외부 혼재)','카테고리':'청소·위생','품목':'물티슈','금액':5000}]
+        p = self.m.compute_pivots(rows)
+        self.assertEqual(p['부서월'][('인사총무','1월')], 3000)
+        self.assertEqual(p['총계'], 8000)
+        self.assertEqual(p['월합']['2월'], 5000)
+        self.assertEqual(p['top20'][0][0], 5000)      # 금액 내림차순
+
 if __name__ == '__main__':
     unittest.main()

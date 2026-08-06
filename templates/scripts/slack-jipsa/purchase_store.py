@@ -45,3 +45,16 @@ def append_month_records(month_path, template_path, records, month_label) -> int
         n += 1
     _atomic_save(wb, month_path)
     return n
+
+INTEGRATED_HEADERS = ['월','일자','부서','용도','카테고리','품목','금액','블록ID']
+INTEGRATED_SHEET = '통합원본'
+
+def read_integrated(analysis_path) -> list:
+    wb = openpyxl.load_workbook(Path(analysis_path), read_only=True, data_only=True)
+    ws = wb[INTEGRATED_SHEET]
+    rows = list(ws.iter_rows(min_row=2, values_only=True)); wb.close()
+    out=[]
+    for r in rows:
+        if not r or r[0] in (None,''): continue
+        out.append({h:(r[i] if i < len(r) else None) for i,h in enumerate(INTEGRATED_HEADERS)})
+    return out

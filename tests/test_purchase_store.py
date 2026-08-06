@@ -35,3 +35,17 @@ class MonthIOTest(unittest.TestCase):
             self.m.append_month_records(out, out, [{'일자':'f','부서':'g','용도':'h','카테고리':'i','품목':'j','수량':2,'단가':2,'금액':2}], '8월')
             wb=openpyxl.load_workbook(out); ws=wb['입력']
             self.assertEqual(ws['A5'].value,'a'); self.assertEqual(ws['A6'].value,'f')
+
+class IntegratedTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_read_integrated(self):
+        import tempfile, openpyxl
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            p=_P(d)/'a.xlsx'; wb=openpyxl.Workbook(); ws=wb.active; ws.title='통합원본'
+            ws.append(['월','일자','부서','용도','카테고리','품목','금액','블록ID'])
+            ws.append(['1월','6일','인사총무','사내비품','사무용품','볼펜',1000,'1월#1'])
+            wb.save(p); wb.close()
+            rows=self.m.read_integrated(p)
+            self.assertEqual(rows[0]['부서'],'인사총무'); self.assertEqual(rows[0]['금액'],1000)
