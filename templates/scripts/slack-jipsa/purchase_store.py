@@ -22,7 +22,7 @@ def append_purchase_log(log_path, records) -> int:
     if log_path.exists():
         wb = openpyxl.load_workbook(log_path)
         ws = wb[LOG_SHEET] if LOG_SHEET in wb.sheetnames else wb.create_sheet(LOG_SHEET)
-        if ws.max_row < 1 or ws.cell(row=1, column=1).value in (None, ''):
+        if ws.cell(row=1, column=1).value in (None, ''):   # 헤더 없으면 추가
             ws.append(LOG_HEADERS)
     else:
         wb = openpyxl.Workbook(); ws = wb.active; ws.title = LOG_SHEET

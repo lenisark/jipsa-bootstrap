@@ -136,7 +136,7 @@ def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
     """붙여넣기 행들 → 분류 → 데몬 전용 누적 구매로그에 append(사람 양식 미접촉).
     반환 {'appended','records'(로그행),'warns','error'}."""
     pstore = _sibling('purchase_store.py')
-    log_path = Path(cfg['folder']) / cfg['purchase_log']
+    log_path = Path(cfg['folder']) / cfg.get('purchase_log', '비품 구매기록_자동.xlsx')
     if pstore.is_locked(log_path):
         return {'appended': 0, 'records': [], 'warns': [], 'error': 'locked'}
     cache_path = Path(cfg['classify_cache']).expanduser()
@@ -185,7 +185,7 @@ def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
     integ = pstore.read_integrated(analysis)
     if not unreflected_months(integ, month_label):
         return nothing                       # 이미 반영된 월
-    log_path = folder / cfg['purchase_log']
+    log_path = folder / cfg.get('purchase_log', '비품 구매기록_자동.xlsx')
     if not log_path.exists():
         return nothing                       # 구매로그 없음
     if pstore.is_locked(analysis) or pstore.is_locked(log_path):
