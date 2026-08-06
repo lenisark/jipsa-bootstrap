@@ -97,13 +97,14 @@ def _day_of(v):
     if m: return f'{int(m.group(1))}일'
     return s
 
-def month_records_to_integrated(input_rows, month_label, yyyymm, seq_start=1):
-    out=[]; seq=seq_start
-    for r in input_rows:
-        out.append({'월':month_label,'일자':_day_of(r.get('일자')),'부서':r.get('부서',''),
-                    '용도':r.get('용도',''),'카테고리':r.get('카테고리',''),'품목':r.get('품목',''),
-                    '금액':_amt(r.get('금액')),'블록ID':f'{yyyymm}#{seq}'})
-        seq+=1
+def log_rows_to_integrated(log_rows):
+    """누적 구매로그 행 → 통합원본 행. 로그의 블록ID 보존, 일자는 'N일'로 변환."""
+    out=[]
+    for r in log_rows:
+        out.append({'월':str(r.get('월','')).strip(),'일자':_day_of(r.get('일자')),
+                    '부서':r.get('부서',''),'용도':r.get('용도',''),
+                    '카테고리':r.get('카테고리',''),'품목':r.get('품목',''),
+                    '금액':_amt(r.get('금액')),'블록ID':r.get('블록ID','')})
     return out
 
 def unreflected_months(integrated_rows, candidate_month) -> bool:
@@ -132,12 +133,11 @@ def _sibling(mod_file):
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
 def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
+    """붙여넣기 행들 → 분류 → 데몬 전용 누적 구매로그에 append(사람 양식 미접촉).
+    반환 {'appended','records'(로그행),'warns','error'}."""
     pstore = _sibling('purchase_store.py')
-    folder = Path(cfg['folder'])
-    yyyymm = when_ymd[:7].replace('-', '')
-    month_path = folder / pstore.month_filename(cfg['month_record_pattern'], yyyymm)
-    tpl_path = folder / cfg['month_record_template']
-    if pstore.is_locked(month_path):
+    log_path = Path(cfg['folder']) / cfg['purchase_log']
+    if pstore.is_locked(log_path):
         return {'appended': 0, 'records': [], 'warns': [], 'error': 'locked'}
     cache_path = Path(cfg['classify_cache']).expanduser()
     try:
@@ -148,12 +148,23 @@ def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
     cmap, cache2 = classify_with_cache(names, cache, run_claude, cfg.get('guide_text',''))
     recs, warns = build_records(rows, cmap, when_ymd,
                                 cfg.get('known_depts', []), cfg.get('dept_aliases', {}))
+    yyyymm = when_ymd[:7].replace('-', '')
     month_label = f'{int(yyyymm[4:6])}월'
-    n = pstore.append_month_records(month_path, tpl_path, recs, month_label)
+    # 블록ID seq: 그 달 기존 로그 건수에서 이어짐(재실행/중복 추적용, 고유)
+    existing = pstore.read_purchase_log(log_path)
+    seq = sum(1 for r in existing if str(r.get('월', '')).strip() == month_label) + 1
+    log_rows = []
+    for rec in recs:
+        log_rows.append({'월': month_label, '일자': rec['일자'], '부서': rec['부서'],
+                         '용도': rec['용도'], '카테고리': rec['카테고리'], '품목': rec['품목'],
+                         '수량': rec['수량'], '단가': rec['단가'], '금액': rec['금액'],
+                         '블록ID': f'{yyyymm}#{seq}'})
+        seq += 1
+    n = pstore.append_purchase_log(log_path, log_rows)
     if cache2 != cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(cache2, ensure_ascii=False, indent=2), encoding='utf-8')
-    return {'appended': n, 'records': recs, 'warns': warns, 'error': None}
+    return {'appended': n, 'records': log_rows, 'warns': warns, 'error': None}
 
 
 def _yymmdd(ymd):
@@ -161,7 +172,7 @@ def _yymmdd(ymd):
 
 
 def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
-    """최신 분석 로드 → 미반영월 판정 → 월별기록 읽기 → 통합원본 변환 →
+    """최신 분석 로드 → 미반영월 판정 → 구매로그에서 해당 월 읽기 → 통합원본 변환 →
     dry_run이면 제안만, 아니면 새 버전 파일 저장(원본 불변). 결정론적 core(LLM 미사용).
     반환 {'status':'proposed'|'merged'|'nothing'|'locked','month','rows','out','summary'}."""
     pstore = _sibling('purchase_store.py')
@@ -174,15 +185,16 @@ def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
     integ = pstore.read_integrated(analysis)
     if not unreflected_months(integ, month_label):
         return nothing                       # 이미 반영된 월
-    month_path = folder / pstore.month_filename(cfg['month_record_pattern'], yyyymm)
-    if not month_path.exists():
-        return nothing                       # 주문기록 파일 없음
-    if pstore.is_locked(analysis) or pstore.is_locked(month_path):
+    log_path = folder / cfg['purchase_log']
+    if not log_path.exists():
+        return nothing                       # 구매로그 없음
+    if pstore.is_locked(analysis) or pstore.is_locked(log_path):
         return {'status': 'locked', 'month': month_label, 'rows': 0, 'out': None, 'summary': {}}
-    input_rows = pstore.read_input_rows(month_path)
-    new_rows = month_records_to_integrated(input_rows, month_label, yyyymm, seq_start=1)
+    month_rows = [r for r in pstore.read_purchase_log(log_path)
+                  if str(r.get('월', '')).strip() == month_label]
+    new_rows = log_rows_to_integrated(month_rows)
     if not new_rows:
-        return nothing
+        return nothing                       # 그 달 로그 없음
     all_rows = integ + new_rows
     pivots = compute_pivots(all_rows)
     summary = {'월합': pivots['월합'], '총계': pivots['총계'], '건수': len(new_rows)}

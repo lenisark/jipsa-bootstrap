@@ -1,6 +1,6 @@
 """비품 구매기록·분석 xlsx IO. supply_store의 잠금감지/원자저장 재활용."""
 from __future__ import annotations
-import shutil, importlib.util
+import importlib.util
 from pathlib import Path
 import openpyxl
 
@@ -10,54 +10,46 @@ supply_store = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(supp
 is_locked = supply_store.is_locked
 _atomic_save = supply_store._atomic_save
 
-INPUT_HEADERS = ['일자','부서','용도','카테고리','품목','수량','단가','금액','발주처','재구매주기','비고']
-INPUT_SHEET = '입력'
-HEADER_ROW = 4          # 데이터는 5행부터
+# 데몬 전용 누적 구매로그(단순 플랫 — 수식/합계/요약 없음, 사람 양식과 분리).
+LOG_HEADERS = ['월','일자','부서','용도','카테고리','품목','수량','단가','금액','블록ID']
+LOG_SHEET = '기록'
 
-def month_filename(pattern: str, yyyymm: str) -> str:
-    return pattern.replace('{yyyymm}', yyyymm)
-
-def append_month_records(month_path, template_path, records, month_label) -> int:
-    month_path, template_path = Path(month_path), Path(template_path)
-    if is_locked(month_path):
+def append_purchase_log(log_path, records) -> int:
+    """누적 구매로그에 append. 없으면 헤더 생성. 엑셀 열림이면 RuntimeError('locked')."""
+    log_path = Path(log_path)
+    if is_locked(log_path):
         raise RuntimeError('locked')
-    if not month_path.exists():
-        shutil.copyfile(template_path, month_path)
-        wb = openpyxl.load_workbook(month_path)
-        ws = wb[INPUT_SHEET]
-        title = ws.cell(row=1, column=1).value
-        if title and '월' in str(title):
-            import re as _re
-            ws.cell(row=1, column=1).value = _re.sub(r'__?\d*_?월', month_label, str(title))
+    if log_path.exists():
+        wb = openpyxl.load_workbook(log_path)
+        ws = wb[LOG_SHEET] if LOG_SHEET in wb.sheetnames else wb.create_sheet(LOG_SHEET)
+        if ws.max_row < 1 or ws.cell(row=1, column=1).value in (None, ''):
+            ws.append(LOG_HEADERS)
     else:
-        wb = openpyxl.load_workbook(month_path)
-        ws = wb[INPUT_SHEET]
-    # 마지막 데이터 행 탐색(A열 기준, HEADER_ROW 이후)
-    last = HEADER_ROW
-    for r in range(HEADER_ROW + 1, ws.max_row + 1):
-        if ws.cell(row=r, column=1).value not in (None, ''):
-            last = r
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = LOG_SHEET
+        ws.append(LOG_HEADERS)
     n = 0
     for rec in records:
-        last += 1
-        for ci, h in enumerate(INPUT_HEADERS, start=1):
-            ws.cell(row=last, column=ci).value = rec.get(h, '')
+        ws.append([rec.get(h, '') for h in LOG_HEADERS])
         n += 1
-    _atomic_save(wb, month_path)
+    _atomic_save(wb, log_path)
     return n
 
-def read_input_rows(month_path) -> list:
-    """월별기록 '입력' 시트(헤더 r4, 데이터 r5~)를 INPUT_HEADERS dict 리스트로 읽는다."""
-    wb = openpyxl.load_workbook(Path(month_path), read_only=True, data_only=True)
-    ws = wb[INPUT_SHEET]
-    raw = list(ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True)); wb.close()
+def read_purchase_log(log_path) -> list:
+    """누적 구매로그(헤더 r1, 데이터 r2~) → LOG_HEADERS dict 리스트. 없으면 []."""
+    log_path = Path(log_path)
+    if not log_path.exists():
+        return []
+    wb = openpyxl.load_workbook(log_path, read_only=True, data_only=True)
+    if LOG_SHEET not in wb.sheetnames:
+        wb.close(); return []
+    raw = list(wb[LOG_SHEET].iter_rows(min_row=2, values_only=True)); wb.close()
     out = []
     for r in raw:
         if not r or all(c in (None, '') for c in r):
             continue
-        rec = {h: (r[i] if i < len(r) else None) for i, h in enumerate(INPUT_HEADERS)}
-        if rec.get('일자') in (None, '') and rec.get('품목') in (None, ''):
-            continue                       # 빈 서식행 무시
+        rec = {h: (r[i] if i < len(r) else None) for i, h in enumerate(LOG_HEADERS)}
+        if rec.get('품목') in (None, ''):
+            continue
         out.append(rec)
     return out
 
