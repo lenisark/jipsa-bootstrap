@@ -110,6 +110,30 @@ class DashboardTest(unittest.TestCase):
             wb.close()
 
 
+class Top20Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+    def test_apply_top20(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)/'a.xlsx'
+            wb = openpyxl.Workbook(); ws = wb.active; ws.title = '큰지출_TOP20'
+            ws['A1'] = '단건 지출 TOP 20 (이상치 점검용)'
+            for c, h in enumerate(['순위','월','부서','용도','카테고리','품목','금액'], start=1):
+                ws.cell(3, c).value = h
+            ws['A4'] = 99; ws['F4'] = '옛데이터'; ws['G4'] = 1   # 덮어써질 값
+            wb.save(p); wb.close()
+            pivots = {'top20': [(500,'3월','매입부','재판매·대고객','청소·위생','방향제'),
+                                (300,'1월','인사총무','사내비품','사무용품','A4'),
+                                (100,'2월','전부서 공통','사내비품','다과·음료','커피')]}
+            wb = openpyxl.load_workbook(p); self.m._apply_top20(wb, pivots); wb.save(p); wb.close()
+            ws = openpyxl.load_workbook(p)['큰지출_TOP20']
+            self.assertEqual([ws.cell(4,c).value for c in range(1,8)],
+                             [1,'3월','매입부','재판매·대고객','청소·위생','방향제',500])
+            self.assertEqual(ws.cell(5,3).value, '인사총무')   # 2위 부서
+            self.assertEqual(ws.cell(6,7).value, 100)          # 3위 금액
+            self.assertIsNone(ws.cell(7,1).value)              # 3건뿐 → 이후 비움
+
+
 class MergeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.m = load()

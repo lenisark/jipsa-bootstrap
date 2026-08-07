@@ -89,6 +89,7 @@ def write_merged_analysis(src_path, out_path, new_integrated_rows, pivots=None):
     if pivots is not None:
         _apply_pivots(wb, pivots)     # PIVOT_LAYOUT 기반 파생시트 확장(Task 12)
         _apply_dashboard(wb, pivots)  # 요약_대시보드 갱신(제목·월평균분모·TOP5·월별추이)
+        _apply_top20(wb, pivots)      # 큰지출_TOP20 재생성(전 기간 단건 상위 20)
     _atomic_save(wb, Path(out_path))
 
 # ── 파생 시트 좌표 상수화(실파일 v1.2 실측) + SUMIFS 보존형 확장 ─────────────
@@ -379,3 +380,32 @@ def _apply_dashboard(wb, pivots):
         if guide_span:                       # 원래 병합 폭으로 새 위치에 재병합
             ws.merge_cells(start_row=r, start_column=guide_span[0],
                            end_row=r, end_column=guide_span[1])
+
+
+# ── 큰지출_TOP20 재생성 (정적 값 시트) ──────────────────────────────────────
+# 헤더 r3: 순위|월|부서|용도|카테고리|품목|금액. 데이터 r4~. compute_pivots['top20']는
+# (금액,월,부서,용도,카테고리,품목) 튜플을 금액 내림차순으로 담고 있다. 정적 값 시트라
+# 매 병합 시 전 기간 상위 20건으로 다시 써준다(부족하면 남는 행은 비운다).
+TOP20_SHEET = '큰지출_TOP20'
+TOP20_FIRST_ROW = 4
+TOP20_MAX = 20
+
+def _apply_top20(wb, pivots):
+    if TOP20_SHEET not in wb.sheetnames:
+        return
+    ws = wb[TOP20_SHEET]
+    top = pivots.get('top20', [])[:TOP20_MAX]
+    r = TOP20_FIRST_ROW
+    for i, t in enumerate(top):
+        amt, mon, dep, use, cat, item = t
+        ws.cell(r, 1).value = i + 1
+        ws.cell(r, 2).value = mon
+        ws.cell(r, 3).value = dep
+        ws.cell(r, 4).value = use
+        ws.cell(r, 5).value = cat
+        ws.cell(r, 6).value = item
+        ws.cell(r, 7).value = amt
+        r += 1
+    for rr in range(r, TOP20_FIRST_ROW + TOP20_MAX):   # 20건 미만이면 남는 행 비우기
+        for c in range(1, 8):
+            ws.cell(rr, c).value = None
