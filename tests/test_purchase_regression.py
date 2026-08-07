@@ -116,14 +116,28 @@ class Regression(unittest.TestCase):
                             for cc in range(1, s0.max_column + 1)
                             if s0.cell(rr, cc).value != s1.cell(rr, cc).value)
                 self.assertEqual(diffs, 0, f'{sheet} 신규부서 없는데 변경됨')
-            for sheet in ['큰지출_TOP20', '요약_대시보드']:
-                if sheet not in wf.sheetnames:
-                    continue
-                s0, s1 = src_wb[sheet], wf[sheet]
+            # 큰지출_TOP20은 여전히 정적(_apply_pivots/_apply_dashboard 대상 아님)
+            if '큰지출_TOP20' in wf.sheetnames:
+                s0, s1 = src_wb['큰지출_TOP20'], wf['큰지출_TOP20']
                 diffs = sum(1 for rr in range(1, s0.max_row + 1)
                             for cc in range(1, s0.max_column + 1)
                             if s0.cell(rr, cc).value != s1.cell(rr, cc).value)
-                self.assertEqual(diffs, 0, f'{sheet} 정적 시트가 변경됨')
+                self.assertEqual(diffs, 0, '큰지출_TOP20 정적 시트가 변경됨')
+
+            # 요약_대시보드는 _apply_dashboard로 갱신됨: 제목 월범위·월평균분모·추이 신규월
+            if '요약_대시보드' in wf.sheetnames:
+                dsh = wf['요약_대시보드']
+                self.assertIn(f'1~{maxm + 1}월', str(dsh['A1'].value))       # 제목 확장
+                self.assertTrue(str(dsh['G5'].value).rstrip().endswith(f'/{len(piv["월합"])}'))  # 분모=월수
+                tmonths = []
+                r = 18
+                while True:
+                    v = dsh.cell(r, 1).value
+                    if v is None or (isinstance(v, str) and v.startswith('시트 가이드')):
+                        break
+                    tmonths.append(str(v).strip()); r += 1
+                self.assertIn(newm, tmonths)                                # 신규 월 추이행
+                self.assertEqual(len(tmonths), len(piv['월합']))            # 추이=존재 월 전체
 
             # (5) 멱등: 같은 pivots 재적용해도 신규 월 중복 추가 없음
             before = [wf['부서별_월별'].cell(3, c).value for c in range(1, 12)]

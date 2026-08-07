@@ -88,6 +88,7 @@ def write_merged_analysis(src_path, out_path, new_integrated_rows, pivots=None):
             ws.cell(row=i, column=ci).value = r.get(h,'')
     if pivots is not None:
         _apply_pivots(wb, pivots)     # PIVOT_LAYOUT 기반 파생시트 확장(Task 12)
+        _apply_dashboard(wb, pivots)  # 요약_대시보드 갱신(제목·월평균분모·TOP5·월별추이)
     _atomic_save(wb, Path(out_path))
 
 # ── 파생 시트 좌표 상수화(실파일 v1.2 실측) + SUMIFS 보존형 확장 ─────────────
@@ -285,3 +286,92 @@ def _apply_pivots(wb, pivots):
             _apply_month_sheet(ws, lay, pivots)
         elif lay['axis'] == 'dept_cross':
             _apply_dept_cross(ws, lay, pivots)
+
+
+# ── 요약_대시보드 갱신 (실파일 v1.2 레이아웃 실측) ──────────────────────────
+# 대시보드는 통합원본 참조 SUMIF/SUMIFS(총지출·사내/재판매·카테고리)라 대부분
+# 자동 재계산되지만, 아래 4가지는 고정값·구조라 코드로 갱신한다:
+#  (1) 제목/라벨의 '1~N월' 범위(A1,A4)  (2) 월평균 분모 G5의 '/N'(월 수)
+#  (3) 부서 TOP5(B9~B13) 라벨+SUMIFS 재정렬(전 기간 사내비품 상위 5)
+#  (4) 월별 추이(r18~) 월 행을 현재 존재 월 전체로 재작성 + '시트 가이드' 행 재배치
+# 값은 전부 SUMIFS 수식으로 써서 엑셀에서 재계산 → 기존 월 수식과 동일 형식.
+DASH_SHEET = '요약_대시보드'
+DASH_TREND_START = 18          # 월별 추이 데이터 시작 행(헤더 r17)
+
+def _apply_dashboard(wb, pivots):
+    if DASH_SHEET not in wb.sheetnames:
+        return
+    ws = wb[DASH_SHEET]
+    months = sorted((m for m in pivots.get('월합', {}) if _month_num(m) is not None),
+                    key=_month_num)
+    if not months:
+        return
+    ncount = len(months)
+    maxm = _month_num(months[-1])
+    # 부서별 사내비품 지출(부서용도 피벗) → TOP5
+    dep = {}
+    for (d, use), v in pivots.get('부서용도', {}).items():
+        if str(use).strip() == '사내비품':
+            dep[d] = dep.get(d, 0) + (v or 0)
+    top5 = [d for d, _ in sorted(dep.items(), key=lambda x: -x[1])[:5]]
+    # (1) 제목/라벨 월범위
+    for coord in ('A1', 'A4'):
+        v = ws[coord].value
+        if isinstance(v, str):
+            ws[coord].value = _re.sub(r'\d+\s*~\s*\d+\s*월', f'1~{maxm}월', v)
+    # (2) 월평균 분모 G5의 끝 '/N'
+    g5 = ws['G5'].value
+    if isinstance(g5, str) and g5.startswith('='):
+        ws['G5'].value = _re.sub(r'/\s*\d+\s*$', f'/{ncount}', g5)
+    # (3) 부서 TOP5 (r9~r13)
+    for i in range(5):
+        r = 9 + i
+        name = top5[i] if i < len(top5) else None
+        ws.cell(r, 1).value = i + 1
+        ws.cell(r, 2).value = name or None
+        if name:
+            ws.cell(r, 3).value = _sumifs_cross('C', name, 'D', '사내비품')
+            ws.cell(r, 4).value = f'=C{r}/SUMIF(통합원본!D:D,"사내비품",통합원본!G:G)'
+        else:
+            ws.cell(r, 3).value = None
+            ws.cell(r, 4).value = None
+    # (4) 월별 추이: 현재 존재 월 전체로 재작성 + 가이드 행 재배치
+    guide_text = guide_row = None
+    for rr in range(DASH_TREND_START, ws.max_row + 2):
+        cv = ws.cell(rr, 1).value
+        if isinstance(cv, str) and cv.startswith('시트 가이드'):
+            guide_text, guide_row = cv, rr
+            break
+    # 열별 서식 템플릿(클리어 전 캡처): A/B/D/G=r18, C(전월대비 %)=r19
+    fmt = {1: ws.cell(DASH_TREND_START, 1).number_format,
+           2: ws.cell(DASH_TREND_START, 2).number_format,
+           3: ws.cell(DASH_TREND_START + 1, 3).number_format,
+           4: ws.cell(DASH_TREND_START, 4).number_format,
+           7: ws.cell(DASH_TREND_START, 7).number_format}
+    clear_to = guide_row if guide_row else ws.max_row
+    # 추이 영역에 걸친 병합(주로 가이드 행 A:H 병합)은 먼저 해제해야 셀에 값 쓰기 가능.
+    guide_span = None
+    for rng in list(ws.merged_cells.ranges):
+        if rng.max_row < DASH_TREND_START or rng.min_row > clear_to:
+            continue
+        if guide_row and rng.min_row == guide_row and rng.max_row == guide_row:
+            guide_span = (rng.min_col, rng.max_col)     # 가이드 행 병합 폭 보존
+        ws.unmerge_cells(str(rng))
+    for rr in range(DASH_TREND_START, clear_to + 1):
+        for c in range(1, 9):
+            ws.cell(rr, c).value = None
+    r = DASH_TREND_START
+    for idx, m in enumerate(months):
+        ws.cell(r, 1).value = m
+        ws.cell(r, 2).value = _sumifs_month(m, 'D', '사내비품')
+        ws.cell(r, 3).value = '-' if idx == 0 else f'=B{r}/B{r - 1}-1'
+        ws.cell(r, 4).value = _sumifs_month(m, 'D', '재판매·대고객')
+        ws.cell(r, 7).value = _sumifs_month(m, 'D', '공용(사내·외부 혼재)')
+        for c in (1, 2, 3, 4, 7):
+            ws.cell(r, c).number_format = fmt[c]
+        r += 1
+    if guide_text:
+        ws.cell(r, 1).value = guide_text
+        if guide_span:                       # 원래 병합 폭으로 새 위치에 재병합
+            ws.merge_cells(start_row=r, start_column=guide_span[0],
+                           end_row=r, end_column=guide_span[1])
