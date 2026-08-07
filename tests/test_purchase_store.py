@@ -56,6 +56,60 @@ class IntegratedTest(unittest.TestCase):
             rows=self.m.read_integrated(p)
             self.assertEqual(rows[0]['부서'],'인사총무'); self.assertEqual(rows[0]['금액'],1000)
 
+class DashboardTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+
+    @staticmethod
+    def _make(path):
+        wb = openpyxl.Workbook(); w0 = wb.active; w0.title = '통합원본'
+        w0.append(['월','일자','부서','용도','카테고리','품목','금액','블록ID'])
+        ws = wb.create_sheet('요약_대시보드')
+        ws['A1'] = 'DSAuto 비품 지출 요약 — 2026년 1~5월 (v1.2: 5월 추가)'
+        ws['A4'] = '1~4월 총 지출'
+        ws['G5'] = '=SUMIF(통합원본!D:D,"사내비품",통합원본!G:G)/5'
+        for i, dept in enumerate(['전부서 공통','인사총무','관리사무소','영업본부','행정지원파트']):
+            r = 9 + i
+            ws.cell(r,1).value = i+1; ws.cell(r,2).value = dept
+            ws.cell(r,3).value = f'=SUMIFS(통합원본!G:G,통합원본!C:C,"{dept}",통합원본!D:D,"사내비품")'
+            ws.cell(r,4).value = f'=C{r}/SUMIF(통합원본!D:D,"사내비품",통합원본!G:G)'
+        ws['A17']='월'; ws['B17']='사내비품'; ws['C17']='전월대비'; ws['D17']='참고: 재판매·대고객'
+        for i, mo in enumerate(['1월','2월','3월','4월','5월']):
+            r = 18 + i; ws.cell(r,1).value = mo
+            ws.cell(r,2).value = f'=SUMIFS(통합원본!G:G,통합원본!A:A,"{mo}",통합원본!D:D,"사내비품")'
+            ws.cell(r,3).value = '-' if i==0 else f'=B{r}/B{r-1}-1'
+        ws['A23'] = '시트 가이드: ①통합원본 ②부서별_월별 …'
+        ws.merge_cells('A1:H1'); ws.merge_cells('A23:H23')   # 제목·가이드 행 병합(실파일 모사)
+        wb.save(path); wb.close()
+
+    def test_apply_dashboard(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)/'a.xlsx'; self._make(p)
+            # 1~8월 존재, 사내비품 부서합: 관리사무소가 최상위가 되도록 구성
+            pivots = {'월합': {f'{n}월': 1000 for n in range(1,9)},
+                      '부서용도': {('관리사무소','사내비품'): 9000, ('전부서 공통','사내비품'): 5000,
+                                   ('인사총무','사내비품'): 3000, ('CX파트','사내비품'): 2000,
+                                   ('영업본부','사내비품'): 1000, ('매입부','사내비품'): 500,
+                                   ('관리사무소','재판매·대고객'): 100}}
+            wb = openpyxl.load_workbook(p); self.m._apply_dashboard(wb, pivots)
+            wb.save(p); wb.close()
+            wb = openpyxl.load_workbook(p); ws = wb['요약_대시보드']
+            self.assertIn('1~8월', ws['A1'].value)                 # 제목 월범위
+            self.assertIn('1~8월', ws['A4'].value)                 # 라벨 월범위
+            self.assertTrue(ws['G5'].value.rstrip().endswith('/8'))# 월평균 분모 = 월 수
+            self.assertEqual(ws['B9'].value, '관리사무소')          # TOP5 재정렬(최상위)
+            self.assertEqual(ws['B10'].value, '전부서 공통')
+            self.assertIn('관리사무소', ws['C9'].value)             # SUMIFS도 재작성
+            self.assertEqual([ws.cell(18+i,1).value for i in range(8)],
+                             ['1월','2월','3월','4월','5월','6월','7월','8월'])   # 추이 8개월
+            self.assertEqual(ws['C18'].value, '-')                 # 첫 달 전월대비 '-'
+            self.assertTrue(str(ws['B18'].value).startswith('=SUMIFS'))
+            self.assertEqual(ws.cell(26,1).value[:6], '시트 가이드')  # 가이드 행 재배치(8개월 → r26)
+            self.assertIn('A26:H26', [str(x) for x in ws.merged_cells.ranges])  # 가이드 병합 재적용
+            self.assertNotIn('A23:H23', [str(x) for x in ws.merged_cells.ranges])  # 옛 위치 병합 해제
+            wb.close()
+
+
 class MergeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.m = load()
