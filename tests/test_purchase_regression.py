@@ -116,13 +116,15 @@ class Regression(unittest.TestCase):
                             for cc in range(1, s0.max_column + 1)
                             if s0.cell(rr, cc).value != s1.cell(rr, cc).value)
                 self.assertEqual(diffs, 0, f'{sheet} 신규부서 없는데 변경됨')
-            # 큰지출_TOP20은 여전히 정적(_apply_pivots/_apply_dashboard 대상 아님)
-            if '큰지출_TOP20' in wf.sheetnames:
-                s0, s1 = src_wb['큰지출_TOP20'], wf['큰지출_TOP20']
-                diffs = sum(1 for rr in range(1, s0.max_row + 1)
-                            for cc in range(1, s0.max_column + 1)
-                            if s0.cell(rr, cc).value != s1.cell(rr, cc).value)
-                self.assertEqual(diffs, 0, '큰지출_TOP20 정적 시트가 변경됨')
+            # 큰지출_TOP20은 _apply_top20으로 전 기간 상위 20건 재생성됨(금액 내림차순)
+            t20 = piv['top20']
+            if '큰지출_TOP20' in wf.sheetnames and t20:
+                ts = wf['큰지출_TOP20']
+                self.assertEqual(ts.cell(4, 7).value, t20[0][0])   # r4 = 최대 단건 금액
+                self.assertEqual(ts.cell(4, 6).value, t20[0][5])   # r4 품목 일치
+                amts = [ts.cell(rr, 7).value for rr in range(4, 24)
+                        if ts.cell(rr, 7).value is not None]
+                self.assertEqual(amts, sorted(amts, reverse=True), 'TOP20 금액 내림차순 아님')
 
             # 요약_대시보드는 _apply_dashboard로 갱신됨: 제목 월범위·월평균분모·추이 신규월
             if '요약_대시보드' in wf.sheetnames:

@@ -122,7 +122,8 @@ def compute_pivots(rows) -> dict:
         use, cat = r.get('용도',''), r.get('카테고리','')
         dm[(dep,mon)] += a; cm[(cat,mon)] += a; um[(use,mon)] += a
         du[(dep,use)] += a; dc[(dep,cat)] += a; mo[mon] += a; total += a
-        items.append((a, r.get('품목',''), dep, mon))
+        # top20 튜플: (금액, 월, 부서, 용도, 카테고리, 품목) — 큰지출_TOP20 시트 열 순서
+        items.append((a, mon, dep, use, cat, r.get('품목','')))
     items.sort(key=lambda x: x[0], reverse=True)
     return {'부서월':dict(dm),'카테고리월':dict(cm),'용도월':dict(um),
             '부서용도':dict(du),'부서카테고리':dict(dc),'월합':dict(mo),
