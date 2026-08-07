@@ -335,30 +335,34 @@ def _apply_dashboard(wb, pivots):
         else:
             ws.cell(r, 3).value = None
             ws.cell(r, 4).value = None
-    # (4) 월별 추이: 현재 존재 월 전체로 재작성 + 가이드 행 재배치
-    guide_text = guide_row = None
-    for rr in range(DASH_TREND_START, ws.max_row + 2):
-        cv = ws.cell(rr, 1).value
-        if isinstance(cv, str) and cv.startswith('시트 가이드'):
-            guide_text, guide_row = cv, rr
-            break
-    # 열별 서식 템플릿(클리어 전 캡처): A/B/D/G=r18, C(전월대비 %)=r19
+    # (4) 월별 추이: 존재 월 전체로 재작성 + 가이드(주석) 행 재배치
+    # 가이드 행은 '시트 가이드' 텍스트에 의존하지 않고 구조로 탐지한다:
+    # r18부터 '월' 라벨 행이 이어지고, 그 다음 비월(非月) 행이 가이드/주석 행.
+    # (텍스트 매칭 폴백으로 max_row까지 지우면 문구가 조금만 바뀌어도 조용히 유실됨)
+    WRITE_COLS = (1, 2, 3, 4, 7)               # A일자·B사내·C전월대비·D재판매·G공용
+    r0 = DASH_TREND_START
+    while _month_num(ws.cell(r0, 1).value) is not None:
+        r0 += 1
+    guide_row = r0 if ws.cell(r0, 1).value not in (None, '') else None
+    guide_text = ws.cell(guide_row, 1).value if guide_row else None
+    clear_to = guide_row if guide_row else (r0 - 1)
+    # 열별 서식 템플릿(클리어 전 캡처): A/B/D/G=r18, C(전월대비 %)=둘째 월 행
     fmt = {1: ws.cell(DASH_TREND_START, 1).number_format,
            2: ws.cell(DASH_TREND_START, 2).number_format,
-           3: ws.cell(DASH_TREND_START + 1, 3).number_format,
+           3: ws.cell(min(DASH_TREND_START + 1, clear_to), 3).number_format,
            4: ws.cell(DASH_TREND_START, 4).number_format,
            7: ws.cell(DASH_TREND_START, 7).number_format}
-    clear_to = guide_row if guide_row else ws.max_row
-    # 추이 영역에 걸친 병합(주로 가이드 행 A:H 병합)은 먼저 해제해야 셀에 값 쓰기 가능.
+    # 추이 영역에 '완전히 포함된' 병합만 해제(위쪽 헤더 병합은 보존). 가이드 폭 보존.
     guide_span = None
     for rng in list(ws.merged_cells.ranges):
-        if rng.max_row < DASH_TREND_START or rng.min_row > clear_to:
+        if rng.min_row < DASH_TREND_START or rng.max_row > clear_to:
             continue
-        if guide_row and rng.min_row == guide_row and rng.max_row == guide_row:
-            guide_span = (rng.min_col, rng.max_col)     # 가이드 행 병합 폭 보존
+        if guide_row and rng.min_row <= guide_row <= rng.max_row:
+            guide_span = (rng.min_col, rng.max_col)
         ws.unmerge_cells(str(rng))
+    # 재작성 대상 열만 클리어(E/F/H 등 미사용 열 보존)
     for rr in range(DASH_TREND_START, clear_to + 1):
-        for c in range(1, 9):
+        for c in WRITE_COLS:
             ws.cell(rr, c).value = None
     r = DASH_TREND_START
     for idx, m in enumerate(months):

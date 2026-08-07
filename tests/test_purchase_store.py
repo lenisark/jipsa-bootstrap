@@ -79,6 +79,7 @@ class DashboardTest(unittest.TestCase):
             ws.cell(r,2).value = f'=SUMIFS(통합원본!G:G,통합원본!A:A,"{mo}",통합원본!D:D,"사내비품")'
             ws.cell(r,3).value = '-' if i==0 else f'=B{r}/B{r-1}-1'
         ws['A23'] = '시트 가이드: ①통합원본 ②부서별_월별 …'
+        ws.merge_cells('A1:H1'); ws.merge_cells('A23:H23')   # 제목·가이드 행 병합(실파일 모사)
         wb.save(path); wb.close()
 
     def test_apply_dashboard(self):
@@ -104,6 +105,8 @@ class DashboardTest(unittest.TestCase):
             self.assertEqual(ws['C18'].value, '-')                 # 첫 달 전월대비 '-'
             self.assertTrue(str(ws['B18'].value).startswith('=SUMIFS'))
             self.assertEqual(ws.cell(26,1).value[:6], '시트 가이드')  # 가이드 행 재배치(8개월 → r26)
+            self.assertIn('A26:H26', [str(x) for x in ws.merged_cells.ranges])  # 가이드 병합 재적용
+            self.assertNotIn('A23:H23', [str(x) for x in ws.merged_cells.ranges])  # 옛 위치 병합 해제
             wb.close()
 
 
