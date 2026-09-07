@@ -159,3 +159,70 @@ class MergeTest(unittest.TestCase):
             self.m.write_merged_analysis(src, out, new, pivots=None)
             wb=openpyxl.load_workbook(out); ws=wb['통합원본']
             self.assertEqual(ws.max_row, 3); self.assertEqual(ws['A3'].value,'8월')
+
+class PivotRepairTest(unittest.TestCase):
+    """실파일 v1.9에서 관측된 손상(빈 행 + 라벨 없는 유령 합계행 + 어긋난 행 참조)을 재현.
+    새 부서만 있고 새 월은 없는 병합(8월 증분)에서도 합계 구조가 복구되어야 한다."""
+    @classmethod
+    def setUpClass(cls): cls.m = load()
+
+    def _corrupt_wb(self):
+        wb = openpyxl.Workbook(); wb.remove(wb.active)
+        # 부서별_월별: r4~5 부서, r6 빈 행, r7 유령 합계행(라벨 없음), r8 부서(행참조 어긋남), r9 합계(범위 어긋남)
+        ws = wb.create_sheet('부서별_월별')
+        ws.cell(3,1,'부서별 월별'); ws.cell(3,2,'1월'); ws.cell(3,3,'2월'); ws.cell(3,4,'합계'); ws.cell(3,5,'비중')
+        for r, dep in ((4,'인사총무'), (5,'매입부')):
+            ws.cell(r,1,dep); ws.cell(r,2,self.m._sumifs_month('1월','C',dep)); ws.cell(r,3,self.m._sumifs_month('2월','C',dep))
+            ws.cell(r,4,f'=SUM(B{r}:C{r})'); ws.cell(r,5,f'=D{r}/$D$9')
+        ws.cell(6,1,'매입부'); ws.cell(6,2,self.m._sumifs_month('1월','C','매입부')); ws.cell(6,4,'=SUM(B6:C6)')   # 중복 부서 행
+        ws.cell(7,2,'=SUM(B4:B5)'); ws.cell(7,3,'=SUM(C4:C5)')                 # 유령 합계행
+        ws.cell(8,1,'고객라운지'); ws.cell(8,2,self.m._sumifs_month('1월','C','고객라운지'))
+        ws.cell(8,3,self.m._sumifs_month('2월','C','고객라운지')); ws.cell(8,4,'=SUM(B6:C6)'); ws.cell(8,5,'=D6/$D$9')
+        ws.cell(9,1,'합계'); ws.cell(9,2,'=SUM(B4:B6)'); ws.cell(9,3,'=SUM(C4:C6)'); ws.cell(9,4,'=SUM(B9:C9)'); ws.cell(9,5,1)
+        # 부서x용도: 같은 구조
+        wd = wb.create_sheet('부서x용도')
+        wd.cell(3,1,'부서 \ 용도')
+        for j, cl in enumerate(self.m.PIVOT_LAYOUT['부서x용도']['col_labels']): wd.cell(3, 2+j, cl)
+        wd.cell(3,5,'합계')
+        for r, dep in ((4,'인사총무'), (5,'매입부'), (8,'고객라운지')):
+            wd.cell(r,1,dep)
+            for j, cl in enumerate(self.m.PIVOT_LAYOUT['부서x용도']['col_labels']):
+                wd.cell(r, 2+j, self.m._sumifs_cross('C', dep, 'D', cl))
+            wd.cell(r,5,f'=SUM(B{r}:D{r})' if r != 8 else '=SUM(B6:D6)')
+        wd.cell(7,2,'=SUM(B4:B5)'); wd.cell(7,3,'=SUM(C4:C5)'); wd.cell(7,4,'=SUM(D4:D5)'); wd.cell(7,5,'=SUM(E4:E5)')
+        wd.cell(9,1,'합계'); wd.cell(9,2,'=SUM(B4:B6)'); wd.cell(9,3,'=SUM(C4:C6)'); wd.cell(9,4,'=SUM(D4:D6)'); wd.cell(9,5,'=SUM(E4:E6)')
+        return wb
+
+    def test_new_dept_without_new_month_repairs_totals(self):
+        wb = self._corrupt_wb()
+        pivots = {'월합': {'1월': 1, '2월': 1},
+                  '부서월': {('인사총무','1월'):1, ('매입부','1월'):1, ('고객라운지','2월'):1, ('손님용','2월'):1},
+                  '부서용도': {('인사총무','사내비품'):1, ('손님용','사내비품'):1},
+                  '카테고리월': {}, '용도월': {}, '부서카테고리': {}}
+        self.m._apply_pivots(wb, pivots)
+        ws = wb['부서별_월별']
+        tot = self.m._locate_total_row(ws, 4)
+        self.assertEqual(ws.cell(tot,1).value, '합계')
+        self.assertEqual(ws.cell(tot-1,1).value, '손님용')                       # 진짜 합계 직전에 삽입
+        self.assertEqual(ws.cell(tot-1,4).value, f'=SUM(B{tot-1}:C{tot-1})')     # 새 부서 행 합계/비중
+        self.assertEqual(ws.cell(tot-1,5).value, f'=D{tot-1}/$D${tot}')
+        self.assertIsNone(ws.cell(7,2).value)                                     # 유령 합계행 제거
+        self.assertIsNone(ws.cell(6,1).value); self.assertIsNone(ws.cell(6,2).value)   # 중복 부서 행 비움
+        self.assertEqual(ws.cell(5,1).value, '매입부')                            # 첫 행은 유지
+        self.assertEqual(ws.cell(8,4).value, '=SUM(B8:C8)')                       # 어긋난 행 참조 복구
+        self.assertEqual(ws.cell(tot,2).value, f'=SUM(B4:B{tot-1})')              # 합계행 범위 복구
+        self.assertEqual(ws.cell(tot,4).value, f'=SUM(B{tot}:C{tot})')
+        self.assertEqual(ws.cell(4,2).value, self.m._sumifs_month('1월','C','인사총무'))   # 기존 SUMIFS 불변
+        self.assertEqual(ws.cell(3,4).value, '합계')                              # 새 월 없음 → 열 이동 없음
+        wd = wb['부서x용도']
+        tot = self.m._locate_total_row(wd, 4)
+        self.assertEqual(wd.cell(tot,1).value, '합계')
+        self.assertEqual(wd.cell(tot-1,1).value, '손님용')
+        self.assertTrue(str(wd.cell(tot-1,2).value).startswith('=SUMIFS('))
+        self.assertIsNone(wd.cell(7,2).value)
+        self.assertEqual(wd.cell(8,5).value, '=SUM(B8:D8)')
+        self.assertEqual(wd.cell(tot,2).value, f'=SUM(B4:B{tot-1})')
+
+    def test_locate_total_row_skips_blank_rows(self):
+        wb = self._corrupt_wb()
+        self.assertEqual(self.m._locate_total_row(wb['부서별_월별'], 4), 9)

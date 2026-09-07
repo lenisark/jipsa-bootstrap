@@ -97,19 +97,18 @@ def _day_of(v):
     if m: return f'{int(m.group(1))}일'
     return s
 
-def log_rows_to_integrated(log_rows):
-    """누적 구매로그 행 → 통합원본 행. 로그의 블록ID 보존, 일자는 'N일'로 변환."""
+def log_rows_to_integrated(log_rows, aliases=None):
+    """누적 구매로그 행 → 통합원본 행. 로그의 블록ID 보존, 일자는 'N일'로 변환.
+    aliases(dept_aliases)는 병합 시점에도 적용 — 별칭 추가 전에 로그에 남은 표기(예: 손님용)를 흡수."""
+    aliases = aliases or {}
     out=[]
     for r in log_rows:
+        dept = str(r.get('부서','') or '').strip()
         out.append({'월':str(r.get('월','')).strip(),'일자':_day_of(r.get('일자')),
-                    '부서':r.get('부서',''),'용도':r.get('용도',''),
+                    '부서':aliases.get(dept, dept),'용도':r.get('용도',''),
                     '카테고리':r.get('카테고리',''),'품목':r.get('품목',''),
                     '금액':_amt(r.get('금액')),'블록ID':r.get('블록ID','')})
     return out
-
-def unreflected_months(integrated_rows, candidate_month) -> bool:
-    have = {str(r.get('월','')).strip() for r in integrated_rows}
-    return candidate_month not in have
 
 def compute_pivots(rows) -> dict:
     from collections import defaultdict
@@ -173,7 +172,7 @@ def _yymmdd(ymd):
 
 
 def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
-    """최신 분석 로드 → 미반영월 판정 → 구매로그에서 해당 월 읽기 → 통합원본 변환 →
+    """최신 분석 로드 → 구매로그에서 해당 월 중 미반영(블록ID) 행 읽기 → 통합원본 변환 →
     dry_run이면 제안만, 아니면 새 버전 파일 저장(원본 불변). 결정론적 core(LLM 미사용).
     반환 {'status':'proposed'|'merged'|'nothing'|'locked','month','rows','out','summary'}."""
     pstore = _sibling('purchase_store.py')
@@ -184,18 +183,19 @@ def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
     if not analysis:
         return nothing
     integ = pstore.read_integrated(analysis)
-    if not unreflected_months(integ, month_label):
-        return nothing                       # 이미 반영된 월
     log_path = folder / cfg.get('purchase_log', '비품 구매기록_자동.xlsx')
     if not log_path.exists():
         return nothing                       # 구매로그 없음
     if pstore.is_locked(analysis) or pstore.is_locked(log_path):
         return {'status': 'locked', 'month': month_label, 'rows': 0, 'out': None, 'summary': {}}
+    # 블록ID 단위 증분: 같은 달을 이미 병합한 뒤 로그에 추가된 행만 반영(월 단위 판정은 후행 입고를 영구 누락시켰음)
+    have = {str(r.get('블록ID', '')).strip() for r in integ}
     month_rows = [r for r in pstore.read_purchase_log(log_path)
-                  if str(r.get('월', '')).strip() == month_label]
-    new_rows = log_rows_to_integrated(month_rows)
+                  if str(r.get('월', '')).strip() == month_label
+                  and str(r.get('블록ID', '')).strip() not in have]
+    new_rows = log_rows_to_integrated(month_rows, cfg.get('dept_aliases', {}))
     if not new_rows:
-        return nothing                       # 그 달 로그 없음
+        return nothing                       # 그 달 로그 없음 또는 전부 이미 반영
     all_rows = integ + new_rows
     pivots = compute_pivots(all_rows)
     summary = {'월합': pivots['월합'], '총계': pivots['총계'], '건수': len(new_rows)}

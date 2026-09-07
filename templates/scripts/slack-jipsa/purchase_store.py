@@ -147,13 +147,33 @@ def _sumifs_cross(row_filter, dept, col_filter, col_label):
             f'통합원본!{col_filter}:{col_filter},"{col_label}")')
 
 def _locate_total_row(ws, first_row):
-    """A열에서 '합계' 행을 찾는다(없으면 마지막 라벨 다음 행)."""
-    r = first_row
-    while ws.cell(r, 1).value not in (None, ''):
-        if str(ws.cell(r, 1).value).strip() == '합계':
+    """A열 '합계' 행. 라벨 없는 빈 행이 끼어 있어도 끝까지 찾는다(없으면 마지막 라벨 다음 행).
+    (첫 공란에서 멈추던 구현은 실파일 v1.8~1.9의 빈 행 앞을 합계로 오판해 유령 합계행을 만들었음)"""
+    end = first_row
+    for r in range(first_row, ws.max_row + 1):
+        v = ws.cell(r, 1).value
+        if str(v).strip() == '합계':
             return r
-        r += 1
-    return r
+        if v not in (None, ''):
+            end = r + 1
+    return end
+
+def _clear_ghost_rows(ws, first_row):
+    """합계행 위 구간에서 (a) 라벨(A열) 없는 행의 잔여 수식, (b) 중복 라벨 행(두 번째 이후)을
+    비운다 — 이전 병합이 남긴 유령 합계행(=SUM(B4:B21) 등)과 중복 부서 행(v1.8~1.9의
+    강남사무실·고객라운지 2회)이 진짜 합계에 중복 합산되는 것을 막는다. 행 자체는 지우지 않아
+    좌표가 안정적(수식 참조 이동 불필요). 반환: 합계 행."""
+    total_row = _locate_total_row(ws, first_row)
+    seen = set()
+    for r in range(first_row, total_row):
+        label = str(ws.cell(r, 1).value or '').strip()
+        if label and label in seen:
+            ws.cell(r, 1).value = None            # 중복 → 빈 행으로
+        seen.add(label)
+        if ws.cell(r, 1).value in (None, ''):
+            for c in range(2, ws.max_column + 1):
+                ws.cell(r, c).value = None
+    return total_row
 
 def _row_labels(ws, first_row, total_row):
     return [str(ws.cell(r, 1).value).strip() for r in range(first_row, total_row)]
@@ -161,7 +181,7 @@ def _row_labels(ws, first_row, total_row):
 def _apply_month_sheet(ws, lay, pivots):
     hr, fr, fmc = lay['header_row'], lay['first_row'], lay['first_month_col']
     filt = lay['row_filter']
-    total_row = _locate_total_row(ws, fr)
+    total_row = _clear_ghost_rows(ws, fr)
     labels = _row_labels(ws, fr, total_row)
     new_dept_rows = []
     # 신규 부서 행 먼저 추가(월 열 좌표에 영향 없음)
@@ -196,29 +216,38 @@ def _apply_month_sheet(ws, lay, pivots):
     have = {lbl for _, lbl in month_cols}
     all_months = {mo for mo in pivots.get('월합', {}) if _month_num(mo) is not None}
     new_months = sorted(all_months - have, key=_month_num)
-    if not new_months:
-        return           # 파이프라인상 '월 병합'은 항상 신규 월을 동반(신규 부서 단독 병합 없음)
     k = len(new_months)
-    # 합계/비중 열을 오른쪽으로 k칸 이동(수식은 아래서 전면 재작성하므로 스타일만 보존)
-    for src_c in (ratio_col, total_col):
-        for r in range(hr, total_row + 1):
-            _copy_cell(ws.cell(r, src_c), ws.cell(r, src_c + k))
-            ws.cell(r, src_c).value = None
+    if k:
+        # 합계/비중 열을 오른쪽으로 k칸 이동(수식은 아래서 전면 재작성하므로 스타일만 보존)
+        for src_c in (ratio_col, total_col):
+            for r in range(hr, total_row + 1):
+                _copy_cell(ws.cell(r, src_c), ws.cell(r, src_c + k))
+                ws.cell(r, src_c).value = None
+        # 신규 월 컬럼 채우기(헤더 스타일은 기존 월 헤더에서 복제)
+        style_hdr = ws.cell(hr, fmc)
+        style_body = ws.cell(fr, fmc)
+        for j, mo in enumerate(new_months):
+            col = total_col + j
+            _copy_cell(style_hdr, ws.cell(hr, col)); ws.cell(hr, col).value = mo
+            for r in range(fr, total_row):
+                if ws.cell(r, 1).value in (None, ''):
+                    continue
+                _copy_cell(style_body, ws.cell(r, col))
+                ws.cell(r, col).value = _sumifs_month(mo, filt, str(ws.cell(r, 1).value).strip())
     new_total_col = total_col + k
     new_ratio_col = ratio_col + k
-    # 신규 월 컬럼 채우기(헤더 스타일은 기존 월 헤더에서 복제)
-    style_hdr = ws.cell(hr, fmc)
-    style_body = ws.cell(fr, fmc)
-    for j, mo in enumerate(new_months):
-        col = total_col + j
-        _copy_cell(style_hdr, ws.cell(hr, col)); ws.cell(hr, col).value = mo
-        for r in range(fr, total_row):
-            _copy_cell(style_body, ws.cell(r, col))
-            ws.cell(r, col).value = _sumifs_month(mo, filt, str(ws.cell(r, 1).value).strip())
     first_L, last_L = _col(fmc), _col(new_total_col - 1)
     tot_L = _col(new_total_col)
-    # 합계/비중 수식 재작성(기존 월 열은 손대지 않음)
+    # 행 합계/비중 + 합계 행 수식은 매 병합마다 전 행 재작성(멱등: 정상 행은 동일 문자열).
+    # 새 월이 없는 병합(월 증분·신규 부서만)에서도 실행돼, 이전 insert_rows가 어긋낸
+    # 행 참조(예: 고객라운지 =SUM(B22:I22))와 합계행 범위를 복구한다. 기존 월 SUMIFS는 불변.
+    style_tot, style_ratio = ws.cell(fr, new_total_col), ws.cell(fr, new_ratio_col)
     for r in range(fr, total_row):
+        if ws.cell(r, 1).value in (None, ''):
+            continue                                  # 빈 행은 빈 채로 둔다
+        if r in new_dept_rows:
+            _copy_cell(style_tot, ws.cell(r, new_total_col))
+            _copy_cell(style_ratio, ws.cell(r, new_ratio_col))
         ws.cell(r, new_total_col).value = f'=SUM({first_L}{r}:{last_L}{r})'
         ws.cell(r, new_ratio_col).value = f'={tot_L}{r}/${tot_L}${total_row}'
     # 합계 행
@@ -249,30 +278,28 @@ def _add_new_depts(ws, lay, pivots, total_row, labels):
 
 def _apply_dept_cross(ws, lay, pivots):
     fr, fc = lay['first_row'], lay['first_col']
-    total_row = _locate_total_row(ws, fr)
+    total_row = _clear_ghost_rows(ws, fr)
     labels = _row_labels(ws, fr, total_row)
-    _add_new_depts(ws, lay, pivots, total_row, labels)
-    new_total_row = _locate_total_row(ws, fr)
-    if new_total_row == total_row:
-        return                                  # 신규 부서 없음 → 전열 SUMIFS 자동재계산
-    # 신규 부서 행에 교차 SUMIFS + 합계 채우기
+    start, new_depts = _add_new_depts(ws, lay, pivots, total_row, labels)
+    total_row = _locate_total_row(ws, fr)
     col_labels = lay['col_labels']; rf = lay['row_filter']; cf = lay['col_filter']
+    tot_c = fc + len(col_labels)
     style_body = ws.cell(fr, fc)
-    for r in range(total_row, new_total_row):    # 새로 삽입된 행들
+    for r in range(start, start + len(new_depts)):    # 새로 삽입된 행: 교차 SUMIFS
         dep = str(ws.cell(r, 1).value).strip()
         for j, cl in enumerate(col_labels):
-            c = fc + j
-            _copy_cell(style_body, ws.cell(r, c))
-            ws.cell(r, c).value = _sumifs_cross(rf, dep, cf, cl)
-        tot_c = fc + len(col_labels)
-        L0, L1 = _col(fc), _col(tot_c - 1)
+            _copy_cell(style_body, ws.cell(r, fc + j))
+            ws.cell(r, fc + j).value = _sumifs_cross(rf, dep, cf, cl)
         _copy_cell(ws.cell(fr, tot_c), ws.cell(r, tot_c))
+    # 행 합계 + 합계 행: 전 행 재작성(멱등). 기존 SUMIFS는 불변, 빈 행은 건너뜀.
+    L0, L1 = _col(fc), _col(tot_c - 1)
+    for r in range(fr, total_row):
+        if ws.cell(r, 1).value in (None, ''):
+            continue
         ws.cell(r, tot_c).value = f'=SUM({L0}{r}:{L1}{r})'
-    # 합계 행 SUM 범위 재작성(삽입으로 늘어난 행 포함)
-    tot_c = fc + len(col_labels)
     for c in range(fc, tot_c + 1):
         L = _col(c)
-        ws.cell(new_total_row, c).value = f'=SUM({L}{fr}:{L}{new_total_row-1})'
+        ws.cell(total_row, c).value = f'=SUM({L}{fr}:{L}{total_row-1})'
 
 def _apply_pivots(wb, pivots):
     """PIVOT_LAYOUT 기반 파생 시트 확장. SUMIFS 수식 보존(값 덮어쓰기 금지).

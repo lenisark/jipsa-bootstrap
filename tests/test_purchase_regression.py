@@ -97,25 +97,42 @@ class Regression(unittest.TestCase):
                 while str(s0.cell(r, 1).value).strip() != '합계':
                     r += 1
                 tot0 = r
-                # 기존 월 컬럼(전 데이터행) 수식 동일
+                # 기존 월 컬럼 수식 동일(라벨 있는 행만 — 유령/중복 라벨 행은 복구 과정에서 비워짐)
+                out_labels = []
                 for rr in range(fr, tot0):
+                    if s1.cell(rr, 1).value in (None, ''):
+                        continue
+                    out_labels.append(str(s1.cell(rr, 1).value).strip())
                     for cc in range(fmc, fmc + mcount):
                         self.assertEqual(s0.cell(rr, cc).value, s1.cell(rr, cc).value,
                                          f'{sheet} r{rr}c{cc} 기존 월 수식이 변함')
+                self.assertEqual(len(out_labels), len(set(out_labels)), f'{sheet} 라벨 중복 잔존')
                 # 신규 월 헤더가 기존 월 다음 컬럼에 추가됨
                 self.assertEqual(str(s1.cell(hr, fmc + mcount).value).strip(), newm)
                 # 신규 월 셀은 SUMIFS 수식(값 덮어쓰기 아님)
                 self.assertTrue(str(s1.cell(fr, fmc + mcount).value).startswith('=SUMIFS('))
 
-            # (4) 신규 부서 없음 → dept_cross / TOP20 / 대시보드 완전 무변경
+            # (4) 신규 부서 없음 → dept_cross: 라벨 행의 SUMIFS 불변 + 합계행/행합계 구조 정합
+            #     (유령 합계행·어긋난 행 참조는 복구되므로 '완전 무변경'은 요구하지 않음)
             for sheet, lay in self.ps.PIVOT_LAYOUT.items():
                 if lay['axis'] != 'dept_cross':
                     continue
                 s0, s1 = src_wb[sheet], wf[sheet]
-                diffs = sum(1 for rr in range(1, s0.max_row + 1)
-                            for cc in range(1, s0.max_column + 1)
-                            if s0.cell(rr, cc).value != s1.cell(rr, cc).value)
-                self.assertEqual(diffs, 0, f'{sheet} 신규부서 없는데 변경됨')
+                fr, fc = lay['first_row'], lay['first_col']
+                tot_c = fc + len(lay['col_labels'])
+                tot = self.ps._locate_total_row(s1, fr)
+                self.assertEqual(str(s1.cell(tot, 1).value).strip(), '합계')
+                for rr in range(fr, tot):
+                    if s1.cell(rr, 1).value in (None, ''):
+                        self.assertTrue(all(s1.cell(rr, cc).value is None for cc in range(2, tot_c + 1)),
+                                        f'{sheet} r{rr} 유령 행 잔존')
+                        continue
+                    for cc in range(fc, tot_c):
+                        self.assertEqual(s0.cell(rr, cc).value, s1.cell(rr, cc).value,
+                                         f'{sheet} r{rr}c{cc} 기존 SUMIFS가 변함')
+                    self.assertEqual(s1.cell(rr, tot_c).value,
+                                     f'=SUM({self.ps._col(fc)}{rr}:{self.ps._col(tot_c - 1)}{rr})')
+                self.assertEqual(s1.cell(tot, fc).value, f'=SUM({self.ps._col(fc)}{fr}:{self.ps._col(fc)}{tot - 1})')
             # 큰지출_TOP20은 _apply_top20으로 전 기간 상위 20건 재생성됨(금액 내림차순)
             t20 = piv['top20']
             if '큰지출_TOP20' in wf.sheetnames and t20:
