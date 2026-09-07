@@ -115,10 +115,11 @@ class ReflectTest(unittest.TestCase):
         self.assertEqual(out[0]['월'],'8월'); self.assertEqual(out[0]['금액'],99800)
         self.assertEqual(out[0]['일자'],'6일'); self.assertEqual(out[0]['블록ID'],'202608#1')
         self.assertNotIn('수량', out[0])          # 통합원본엔 수량 없음
-    def test_unreflected(self):
-        integ=[{'월':'5월'}]
-        self.assertTrue(self.m.unreflected_months(integ,'8월'))
-        self.assertFalse(self.m.unreflected_months(integ,'5월'))
+    def test_log_to_integrated_applies_aliases(self):
+        logs=[{'월':'8월','일자':'2026-08-31','부서':'손님용','금액':100,'블록ID':'202608#9'},
+              {'월':'8월','일자':'2026-08-31','부서':'매입부','금액':100,'블록ID':'202608#10'}]
+        out=self.m.log_rows_to_integrated(logs, {'손님용':'인사총무'})
+        self.assertEqual(out[0]['부서'],'인사총무'); self.assertEqual(out[1]['부서'],'매입부')
 
 class MergeOrchTest(unittest.TestCase):
     @classmethod
@@ -219,6 +220,24 @@ class MergeOrchTest(unittest.TestCase):
             self.assertEqual(a.stat().st_mtime, src_mtime)                  # 원본 불변
             wb=openpyxl.load_workbook(out); ws=wb['통합원본']
             self.assertEqual(ws.max_row,3); self.assertEqual(ws['A3'].value,'6월')
+
+    def test_incremental_rows_into_already_reflected_month(self):
+        # 8월 일부(#1)는 이전 병합으로 이미 반영, 그 뒤 로그에 #2가 추가된 경우 → #2만 제안
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as d:
+            d=_P(d)
+            a=d/'260807-HGA-비품주문분석-v1.9.xlsx'
+            self._make_analysis(a, [['8월','6일','인사총무','사내비품','사무용품','볼펜',1000,'202608#1']])
+            self._make_log(d/'비품 구매기록_자동.xlsx',
+                [['8월','2026-08-06','인사총무','사내비품','사무용품','볼펜',1,1000,1000,'202608#1'],
+                 ['8월','2026-08-31','매입부','사내비품','IT·전자','마우스',1,50000,50000,'202608#2']])
+            cfg={'folder':str(d),'analysis_prefix':'비품주문분석','dept_code':'HGA',
+                 'purchase_log':'비품 구매기록_자동.xlsx'}
+            res=self.m.merge_month_into_analysis(cfg,'202608','2026-09-07',dry_run=True)
+            self.assertEqual(res['status'],'proposed')
+            self.assertEqual(res['rows'],1)                          # #1 중복 제외
+            self.assertEqual(res['summary']['월합']['8월'],51000)     # 기존 1000 + 신규 50000
 
     def test_yymmdd(self):
         self.assertEqual(self.m._yymmdd('2026-08-06'),'260806')

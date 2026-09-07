@@ -335,8 +335,29 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
     cmd.extend(['--session-id', session_id] if is_new else ['--resume', session_id])
     # cwd → 해당 폴더의 CLAUDE.md 자동 로드 → 채널별 페르소나/규칙 적용
     run_cwd = cwd or str(Path.home() / '.claude/scripts/slack-jipsa')
-    return subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                          encoding='utf-8', env=env, cwd=run_cwd, timeout=timeout)
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                       encoding='utf-8', env=env, cwd=run_cwd, timeout=timeout)
+    if r.returncode != 0 and not (r.stderr or '').strip():
+        _warn_auth_expiry()
+    return r
+
+
+_auth_warned_at = 0.0
+
+def _warn_auth_expiry() -> None:
+    """rc≠0 + stderr 빈 문자열 = Claude 로그인(OAuth refresh 토큰, 약 28일) 만료 패턴.
+    --print 모드는 인증 에러를 stderr에 안 찍어 조용히 죽으므로 로그 + 개인채널에 1시간 1회 경고."""
+    global _auth_warned_at
+    log('  stderr 비어있음 → Claude 로그인 만료 의심. 터미널에서 claude 실행 후 /login')
+    if time.time() - _auth_warned_at < 3600:
+        return
+    _auth_warned_at = time.time()
+    try:
+        web.chat_postMessage(channel=CHANNEL, text=(
+            '⚠️ 집사가 Claude 호출에 계속 실패하고 있어요(로그인 만료 의심). '
+            '터미널에서 `claude` 실행 후 `/login` 해주세요. 데몬 재시작은 필요 없어요.'))
+    except Exception as e:
+        log(f'  auth warn post fail: {e}')
 
 
 def call_claude(prompt: str, channel: str, timeout: int = 900, thread_ts: str = '') -> str:
