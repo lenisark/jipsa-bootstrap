@@ -200,6 +200,15 @@ if [[ -z "$TASK" && "${TOOL_COUNT:-0}" -eq 0 ]]; then
   exit 0
 fi
 
+# 잡음 거르기 — 다른 세션·서브에이전트가 보낸 메시지로 돈 턴, 도구 없이 짧게 답한 턴("네, 알려드릴게요")
+if [[ "$TASK" == "Another Claude session sent a message"* || "$TASK" == *"<agent-message"* ]]; then
+  exit 0
+fi
+RESULT_LEN=$(printf '%s' "$TURN_DATA" | jq -r '.result | length')
+if [[ "${TOOL_COUNT:-0}" -eq 0 && "${RESULT_LEN:-0}" -lt 200 ]]; then
+  exit 0
+fi
+
 # ── 디버그 로그 ────────────────────────────────────────────────────
 HOOK_LOG="${HOOK_LOG:-/tmp/slack-session-summary.log}"
 _log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HOOK_LOG" 2>/dev/null || true; }

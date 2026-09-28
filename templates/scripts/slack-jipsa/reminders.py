@@ -67,7 +67,9 @@ def _run_action(web, r: dict) -> None:
         log(f'action exec err id={r.get("id")}: {e}')
         out = None
     try:
-        if out:
+        if out == '':
+            pass                          # 실행기가 직접 게시했거나 보고할 게 없음(빈 요약 등)
+        elif out:
             # 지시문 echo 없이 결과(요약)만 게시. (결과 자체에 제목이 들어있음)
             web.chat_postMessage(channel=ch, mrkdwn=True, text=out)
         else:
@@ -102,6 +104,18 @@ def is_non_working(d: date) -> bool:
     if d.isoformat() in _extra_holidays():
         return True
     return False
+
+
+def summary_window(today: date, cursor: date | None) -> tuple[date, date]:
+    """요약 대상 기간 [start, end) — end=오늘 00:00.
+    start = 지난 요약이 덮은 끝(cursor). 없으면 직전 영업일. 최대 7일로 제한.
+    (연휴·PC꺼짐으로 거른 날도 다음 실행에서 이어서 요약되도록)"""
+    start = cursor
+    if start is None:
+        start = today - timedelta(days=1)
+        while is_non_working(start) and start > today - timedelta(days=7):
+            start -= timedelta(days=1)
+    return max(start, today - timedelta(days=7)), today
 
 
 def _last_day(y: int, m: int) -> int:
