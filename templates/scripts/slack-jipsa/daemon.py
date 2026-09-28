@@ -242,6 +242,8 @@ def load_channels() -> dict[str, dict]:
                     'output_roots': [_expand(d) for d in (cfg.get('output_roots') or [])],
                     # 2.0: 기본 저장 위치(시스템 프롬프트로 주입). `저장폴더` 명령으로 갱신.
                     'output_dir': _expand(cfg.get('output_dir') or ''),
+                    # 만료 알림(알리미 봇) 채널 — '경과' 알림을 이 채널의 미결 과제로 등록
+                    'expiry_watch': cfg.get('expiry_watch', ''),
                 }
             # 런타임 오버라이드 병합 (슬랙에서 바꾼 add_dirs/output_dir — 재시작에도 유지)
             for ch, patch in _load_overrides().items():
@@ -434,7 +436,8 @@ def _expand_with_replies(channel: str, messages: list) -> list:
     return out
 
 
-def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None = None) -> str:
+def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None = None,
+                          oldest_ts: float | None = None, latest_ts: float | None = None) -> str:
     """채널 최근 메시지를 '[MM-DD HH:MM] 이름: 내용' 형식으로 수집(시각 포함).
     스레드 답글은 부모 뒤에 시간순으로 '↳' 표시와 함께 포함.
 
@@ -443,15 +446,21 @@ def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     kst = _tz(_td(hours=9))
     try:
-        if since_days:
-            now = _dt.now(kst)
-            oldest_dt = (now - _td(days=since_days)).replace(
-                hour=0, minute=0, second=0, microsecond=0)
-            oldest = f'{oldest_dt.timestamp():.6f}'
+        if since_days or oldest_ts:
+            if oldest_ts:
+                oldest = f'{oldest_ts:.6f}'
+            else:
+                now = _dt.now(kst)
+                oldest_dt = (now - _td(days=since_days)).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                oldest = f'{oldest_dt.timestamp():.6f}'
             raw = []
             cursor = None
             for _ in range(12):          # 최대 12페이지(≈2400건) 안전장치
                 kw = {'channel': channel, 'limit': 200, 'oldest': oldest}
+                if latest_ts:
+                    kw['latest'] = f'{latest_ts:.6f}'
+                    kw['inclusive'] = False
                 if cursor:
                     kw['cursor'] = cursor
                 resp = web.conversations_history(**kw)
@@ -479,7 +488,7 @@ def _collect_channel_text(channel: str, limit: int = 300, since_days: int | None
             lines.append(f'[{stamp}] {mark}{nm}: {txt}')
         except Exception:
             lines.append(f'{mark}{nm}: {txt}')
-    cap = 20000 if since_days else 8000
+    cap = 20000 if (since_days or oldest_ts) else 8000
     return '\n'.join(lines)[-cap:]
 
 
@@ -491,6 +500,10 @@ def run_scheduled_action(channel: str, prompt: str) -> str | None:
     - '대화 요약' 의도면 채널 히스토리를 가져와 프롬프트에 주입(claude는 슬랙 접근 불가).
     """
     cfg = CHANNELS.get(channel, {})
+    if _OPEN_TASKS.search(prompt):
+        return post_open_tasks(channel)
+    if _CONV_SUMMARY.search(prompt) and not _WEEK_SUMMARY.search(prompt):
+        return run_daily_summary(channel, prompt)
     effective = prompt
     if _CONV_SUMMARY.search(prompt):
         days = 7 if _WEEK_SUMMARY.search(prompt) else None
@@ -524,6 +537,154 @@ def run_scheduled_action(channel: str, prompt: str) -> str | None:
         return to_mrkdwn(out)
     except Exception:
         return out
+
+
+# ── 일일 요약 + 미결 과제 (2026-09 업그레이드) ─────────────────────
+from datetime import datetime, timezone, timedelta, date  # noqa: E402
+_OPEN_TASKS = re.compile(r'미결\s*과제')
+SUMMARY_CURSOR_FILE = Path.home() / '.claude/scripts/slack-jipsa/summary_cursor.json'
+_KST = timezone(timedelta(hours=9))
+_WD = '월화수목금토일'
+
+
+def _kst_midnight_ts(d) -> float:
+    return datetime(d.year, d.month, d.day, tzinfo=_KST).timestamp()
+
+
+def _day_label(d) -> str:
+    return f'{d.month}/{d.day}({_WD[d.weekday()]})'
+
+
+def _load_cursor() -> dict:
+    try:
+        return json.loads(SUMMARY_CURSOR_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_cursor(channel: str, end) -> None:
+    d = _load_cursor()
+    d[channel] = end.isoformat()
+    try:
+        SUMMARY_CURSOR_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        log(f'  cursor save fail: {e}')
+
+
+def _open_tasks_text(channel: str) -> str:
+    rows = tsk.list_tasks(channel, states=('대기', '진행', '막힘'))
+    return '\n'.join(f"- {r['title']} (담당: {r['assignee'] or '미정'})" for r in rows) or '(없음)'
+
+
+def _post_task_items(channel: str, thread_ts: str, items: list[dict]) -> None:
+    """과제마다 스레드 답글 1개 — 그 답글에 ✅ 누르면 완료 처리."""
+    for it in items:
+        who = f" · 담당 {it['owner']}" if it.get('owner') else ''
+        due = f" · 기한 {it['due']}" if it.get('due') else ''
+        try:
+            r = web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=f"📋 {it['title']}{who}{due}\n_끝나면 이 메시지에 ✅_")
+            tsk.add_msg_ts(it['id'], r['ts'])
+        except Exception as e:
+            log(f'  task item post fail: {e}')
+
+
+def _scan_expiry_alerts(channel: str) -> list[dict]:
+    """channels.json 의 expiry_watch 채널에서 최근 14일 '경과' 알림 → 과제 후보."""
+    src = CHANNELS.get(channel, {}).get('expiry_watch')
+    if not src:
+        return []
+    try:
+        msgs = web.conversations_history(channel=src, limit=200,
+                                         oldest=f'{time.time() - 14 * 86400:.6f}').get('messages', [])
+    except Exception as e:
+        log(f'  expiry scan fail: {e}')
+        return []
+    titles = sorted({tsk.expiry_title(m.get('text') or '') for m in msgs} - {None})
+    return [{'title': t, 'owner': '', 'due': ''} for t in titles]
+
+
+def run_daily_summary(channel: str, prompt: str = '') -> str | None:
+    """일일 요약: 기간을 코드가 확정(지난 요약 끝 ~ 오늘 00:00, 지시에 '오늘'이 있으면 지금까지) →
+    요약 게시 + 새 미결 과제 등록(스레드). 직접 게시하므로 성공 시 '' 반환. 대화 없으면 조용히 skip."""
+    cfg = CHANNELS.get(channel, {})
+    today = datetime.now(_KST).date()
+    end_day = today + timedelta(days=1) if '오늘' in prompt else today
+    cur = _load_cursor().get(channel)
+    start, end = rmd.summary_window(end_day, date.fromisoformat(cur) if cur else None)
+    if start >= end:
+        return ''
+    last = end - timedelta(days=1)
+    period = _day_label(start) if start == last else f'{_day_label(start)}~{_day_label(last)}'
+    convo = _collect_channel_text(channel, oldest_ts=_kst_midnight_ts(start),
+                                  latest_ts=_kst_midnight_ts(end))
+    want_todo = _tasks_enabled(channel)
+    body, new_items = '', []
+    if convo:
+        todo_rule = (
+            "\n\n요약 뒤에 아래 형식의 블록을 반드시 붙이세요(해당 없으면 []). 이 블록은 사람에게 보이지 않습니다.\n"
+            f'{tsk.TODO_OPEN}\n[{{"title": "할 일(누가 무엇을)", "owner": "담당자 이름", "due": "YYYY-MM-DD 또는 빈칸"}}]\n{tsk.TODO_CLOSE}\n'
+            "기준: 요청·지시·약속 중 기간 안에 끝났다는 말이 없는 것만. 잡담·단순 공유·이미 끝난 일은 제외. "
+            "아래 '이미 등록된 미결 과제'와 같은 일은 넣지 마세요. 최대 5개.\n"
+            f"[이미 등록된 미결 과제]\n{_open_tasks_text(channel)}") if want_todo else ''
+        effective = (
+            f"다음은 이 슬랙 채널의 {period} 대화 기록입니다(시각은 KST). "
+            "이 기록만 근거로 요약하세요. 기록에 없는 내용은 지어내지 마세요.\n"
+            f"첫 줄은 `*{period} 채널 요약*` 으로 쓰세요(날짜·요일을 바꾸지 마세요). "
+            "주제별로 묶고, 파일 저장 여부 같은 작업 방식 언급은 쓰지 마세요.\n\n"
+            f"[대화 기록]\n{convo}\n\n[요청]\n{prompt}{todo_rule}")
+        try:
+            r = _run_claude(effective, str(uuid.uuid4()), True, 600,
+                            cfg.get('model', 'opus'), cfg.get('cwd'),
+                            cfg.get('add_dirs'), cfg.get('disallowed_tools'),
+                            output_dir=cfg.get('output_dir', ''))
+        except Exception as e:
+            log(f'  daily summary fail: {e}')
+            return None
+        if r.returncode != 0 or not (r.stdout or '').strip():
+            log(f'  daily summary rc={r.returncode}: {(r.stderr or "")[-200:]}')
+            return None
+        body, todos = tsk.split_todo_block(r.stdout)
+        if want_todo:
+            new_items = tsk.add_open_items(channel, todos, f'summary:{period}')
+    if want_todo:
+        new_items += tsk.add_open_items(channel, _scan_expiry_alerts(channel), 'expiry')
+    if not body and not new_items:
+        _save_cursor(channel, end)
+        log(f'  daily summary skip: {period} 대화 없음')
+        return ''
+    try:
+        from lib.slack_mrkdwn import to_mrkdwn
+        body = to_mrkdwn(body) if body else ''
+    except Exception:
+        pass
+    if new_items:
+        body = (body + '\n\n' if body else '') + f'📋 새 미결 과제 {len(new_items)}건 — 스레드에서 확인'
+    posted = web.chat_postMessage(channel=channel, mrkdwn=True, text=body)
+    _post_task_items(channel, posted['ts'], new_items)
+    _save_cursor(channel, end)
+    return ''
+
+
+def post_open_tasks(channel: str) -> str:
+    """주간: 열린 과제 목록(LLM 없이 코드로). 과제별 스레드 답글에 ✅ → 완료."""
+    if not _tasks_enabled(channel):
+        return '이 채널은 작업 기능이 꺼져 있어요.'
+    rows = tsk.list_tasks(channel, states=('대기', '진행', '막힘'))
+    if not rows:
+        return '✅ 이번 주 시작 기준 미결 과제가 없어요.'
+    rows.sort(key=lambda r: json.loads(r.get('meta') or '{}').get('due') or '9999')
+    head = web.chat_postMessage(
+        channel=channel, mrkdwn=True,
+        text=f'*📋 미결 과제 {len(rows)}건* — 끝난 건 스레드의 해당 메시지에 ✅ 눌러주세요')
+    items = []
+    for r in rows:
+        meta = json.loads(r.get('meta') or '{}')
+        since = datetime.fromtimestamp(r['created_at'], _KST).strftime('%m/%d')
+        items.append({'id': r['id'], 'title': f"{r['title']}  _(등록 {since})_",
+                      'owner': r['assignee'], 'due': meta.get('due', '')})
+    _post_task_items(channel, head['ts'], items)
+    return ''
 
 
 # ── 대화 요약 (팀 협업) ────────────────────────────────────────────
@@ -1025,7 +1186,8 @@ def handle_help(channel: str) -> None:
         text += (
             "\n\n*📋 작업*\n"
             f"• `{p}작업목록`  _(열린 작업 보기)_\n"
-            f"• `{p}작업 ab12cd34 진행|막힘|완료|취소`  _(상태 변경)_"
+            f"• `{p}작업 ab12cd34 진행|막힘|완료|취소`  _(상태 변경)_\n"
+            "• 요약 스레드의 📋 미결 과제 메시지에 ✅  _(완료 처리)_"
         )
     web.chat_postMessage(channel=channel, text=text, mrkdwn=True)
 
@@ -1542,6 +1704,14 @@ def _handle_completion(ch: str, ts: str, user: str) -> None:
     name = _resolve_name(user)
     info = rmd.record_completion(ts, user, name)
     if not info:                                       # 알림 발사 메시지가 아니거나 이미 완료
+        t = tsk.find_open_by_msg(ch, ts) if _tasks_enabled(ch) else None
+        if t and tsk.close_task(t['id']):              # 미결 과제 메시지에 ✅
+            try:
+                web.chat_postMessage(channel=ch, thread_ts=ts,
+                                     text=f"✅ {name}님이 완료 처리했어요 — {t['title']}")
+            except Exception as e:
+                log(f'  task done post fail: {e}')
+            log(f"task done id={t['id'][:8]} by={name}")
         return
     try:
         web.chat_postMessage(channel=ch, thread_ts=ts,

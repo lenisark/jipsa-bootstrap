@@ -25,6 +25,7 @@
     "require_mention": true,
     "mission": "부서 공용 집사. 알리미/FAQ/투표/요약/온보딩.",
     "tasks_enabled": true,
+    "expiry_watch": "C_EXPIRY_ALERT_CHANNEL_ID",
     "output_roots": ["~/Documents/부서공유"],
     "output_dir": "~/Documents/부서공유/집사 생성물",
     "gate": {
