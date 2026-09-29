@@ -273,13 +273,35 @@ def sync_once(web, cfg: dict, run_claude, post, dry_run: bool = False) -> dict:
 
 
 # ── 입고 (P2): 구매표 붙여넣기 → 재고 가산 ───────────────────────────
-def parse_purchase_table(text: str) -> list[dict]:
-    """붙여넣은 구매표 텍스트 → [{품명, 수량, 금액, 부서}]. 탭/파이프/2+공백 구분.
+_DATE_CELL = re.compile(
+    r'^(?:(\d{4})\s*[.\-/년]\s*)?(\d{1,2})\s*(?:[.\-/]|월)\s*(\d{1,2})\s*(?:일|\.)?$')
+
+
+def parse_date_cell(s: str, today=None) -> str | None:
+    """'9월 17일'·'9/17'·'2026. 9. 17'·'2026-09-17' → 'YYYY-MM-DD'. 날짜가 아니면 None.
+    연도가 없으면 올해, 단 오늘보다 뒤 달이면 작년(1월에 12월분 넣는 경우)."""
+    from datetime import date
+    m = _DATE_CELL.match((s or '').strip())
+    if not m:
+        return None
+    today = today or date.today()
+    mo, d = int(m.group(2)), int(m.group(3))
+    y = int(m.group(1)) if m.group(1) else (today.year - 1 if mo > today.month else today.year)
+    try:
+        return date(y, mo, d).isoformat()
+    except ValueError:
+        return None
+
+
+def parse_purchase_table(text: str, today=None) -> list[dict]:
+    """붙여넣은 구매표 텍스트 → [{품명, 수량, 금액, 부서, 날짜}]. 탭/파이프/2+공백 구분.
 
     형식 예: `no  품명  수량  금액  계좌  출금계좌  부서` (앞 no는 선택).
     품명 뒤 첫 정수 토큰 = 수량, 그 다음 정수 토큰 = 금액(없으면 0). 못 읽는 줄은 건너뛴다.
+    날짜 칸(예: `9월 17일`, `9/17`)이 있으면 그 날짜를 쓰고, 날짜 칸이 빈 줄은 윗줄 날짜를 이어 쓴다.
     """
     rows = []
+    last_date = ''
     for line in (text or '').splitlines():
         line = line.strip()
         if not line:
@@ -297,7 +319,15 @@ def parse_purchase_table(text: str) -> list[dict]:
             parts = parts[1:]
         if len(parts) < 2:
             continue
-        if '품명' in parts[0] or '수량' in parts[0]:   # 헤더 행 skip
+        if '품명' in parts[0] or '수량' in parts[0] or any(p in ('품명', '수량') for p in parts):   # 헤더 행 skip
+            continue
+        for i, p in enumerate(parts):          # 날짜 칸 떼어내기(어느 위치든 첫 날짜 1개)
+            dt = parse_date_cell(p, today)
+            if dt:
+                last_date = dt
+                parts = parts[:i] + parts[i + 1:]
+                break
+        if len(parts) < 2:
             continue
         name = parts[0]
         qty = None
@@ -321,7 +351,7 @@ def parse_purchase_table(text: str) -> list[dict]:
                 continue
             amount = int(t)             # 그 다음 정수 = 금액
             break
-        rows.append({'품명': name, '수량': qty, '금액': amount, '부서': dept})
+        rows.append({'품명': name, '수량': qty, '금액': amount, '부서': dept, '날짜': last_date})
     return rows
 
 

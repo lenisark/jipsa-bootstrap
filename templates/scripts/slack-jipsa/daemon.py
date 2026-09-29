@@ -962,25 +962,219 @@ def _do_inbound_register(channel: str, body: str, cfg: dict) -> bool:
             "(엑셀/그룹웨어에서 복사해 붙여도 됩니다)"))
         return True
     if pcfg and pcfg.get('mode') == 'purchase':
-        import purchase as pur
-        from datetime import datetime, timezone, timedelta
-        when = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
-        res = pur.apply_purchase_record(pcfg, rows, lambda p: _supply_match_claude(p, cfg), when)
-        if res.get('error') == 'locked':
-            web.chat_postMessage(channel=channel, text='📕 구매기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
-            return True
-        lines = [f'🧾 구매기록 {res["appended"]}건 저장 ({when[:7]})']
-        for r in res['records'][:20]:
-            lines.append(f"• {r['품목']} ×{r['수량']} — {r['금액']:,}원 [{r['부서']}/{r['카테고리']}]")
-        for w in res['warns'][:5]:
-            lines.append('⚠️ ' + w)
-        web.chat_postMessage(channel=channel, text='\n'.join(lines), mrkdwn=True)
+        _record_purchase_rows(channel, rows, pcfg, cfg)
         return True
     # (레거시) 재고 모드
     res = sply.apply_inbound(cfg, rows, lambda p: _supply_match_claude(p, cfg))
     hdr = f'입고등록 {len(rows)}행 처리' + (' (AI 표 인식)' if used_llm else '')
     _supply_reply(channel, res, header=hdr)
     return True
+
+
+def _record_purchase_rows(channel: str, rows: list, pcfg: dict, cfg: dict,
+                          thread_ts: str | None = None) -> bool:
+    """구매표 행 → 구매기록 저장 + 결과 게시(표 붙여넣기·캡처 ✅ 공용). 저장했으면 True."""
+    import purchase as pur
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone(timedelta(hours=9)))
+    when = now.strftime('%Y-%m-%d')
+    res = pur.apply_purchase_record(pcfg, rows, lambda p: _supply_match_claude(p, cfg), when)
+    if res.get('error') == 'locked':
+        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                             text='📕 구매기록 파일이 열려 있어요. 닫고 다시 시도해 주세요.')
+        return False
+    months: dict[str, int] = {}
+    for r in res['records']:
+        months[r['블록ID'][:6]] = months.get(r['블록ID'][:6], 0) + 1
+    where = ', '.join(f'{int(k[4:])}월 {n}건' for k, n in sorted(months.items()))
+    total = sum(int(r['금액'] or 0) for r in res['records'])
+    lines = [f'🧾 구매기록 {res["appended"]}건 저장 ({where}) · 합계 {total:,}원']
+    for r in res['records'][:20]:
+        lines.append(f"• {r['품목']} ×{r['수량']} — {r['금액']:,}원 [{r['부서']}/{r['카테고리']}]")
+    for w in res['warns'][:5]:
+        lines.append('⚠️ ' + w)
+    cur = f'{now.year:04d}{now.month:02d}'
+    past = sorted(k for k in months if k < cur)
+    if past:
+        lines.append('📌 지난 달 기록이 들어갔어요. 이미 분석을 확정한 달이면 '
+                     + ', '.join(f'`@집사 분석 갱신 확정 {k}`' for k in past) + ' 로 다시 반영해 주세요.')
+    web.chat_postMessage(channel=channel, thread_ts=thread_ts, text='\n'.join(lines), mrkdwn=True)
+    return True
+
+
+# ── 주문 캡처 → 입고등록 (미리보기 → 담당자 ✅ 로 확정) ──────────────
+INBOUND_PENDING_FILE = Path.home() / '.claude/scripts/slack-jipsa/inbound_pending.json'
+INBOUND_TMP = Path.home() / '.claude/scripts/slack-jipsa/tmp_inbound'
+
+
+def _load_inbound_pending() -> dict:
+    try:
+        d = json.loads(INBOUND_PENDING_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    return {k: v for k, v in d.items() if v.get('expires', 0) > time.time()}
+
+
+def _save_inbound_pending(d: dict) -> None:
+    try:
+        INBOUND_PENDING_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        log(f'  inbound pending save fail: {e}')
+
+
+def _download_slack_file(f: dict, dest: Path) -> bool:
+    """봇 토큰(files:read)으로 슬랙 파일 받기. 이미지가 아니라 HTML(권한 없음)이 오면 False."""
+    import urllib.request
+    url = f.get('url_private_download') or f.get('url_private')
+    if not url and f.get('id'):
+        f = web.files_info(file=f['id']).get('file', {})
+        url = f.get('url_private_download') or f.get('url_private')
+    if not url:
+        return False
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {BOT_TOKEN}'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read(15 * 1024 * 1024)
+    if data[:15].lstrip().lower().startswith((b'<!doctype', b'<html')):
+        return False
+    dest.write_bytes(data)
+    return True
+
+
+def handle_file_share(event: dict) -> None:
+    """구매 채널에서 담당자가 `@집사 입고등록 [부서]` + 주문 캡처를 올리면 판독 → 미리보기.
+    (파일 첨부 메시지는 원래 무시했다 — 이 경우만 받는다)"""
+    pcfg = _load_purchase_cfg()
+    channel, user = event.get('channel', ''), event.get('user', '')
+    if not pcfg or pcfg.get('mode') != 'purchase' or channel != pcfg.get('channel') or user == BOT:
+        return
+    text = re.sub(r'<@[A-Z0-9]+(\|[^>]+)?>', ' ', event.get('text') or '').strip()
+    first = text.split('\n', 1)[0].strip()
+    key = (channel, user)
+    waiting = time.time() <= _inbound_wait.get(key, 0)
+    if not (re.match(r'^입고\s*등록', first) or waiting):
+        return
+    images = [f for f in (event.get('files') or []) if (f.get('mimetype') or '').startswith('image/')]
+    if not images:
+        return
+    managers = set(pcfg.get('managers', [])) | ({MIRI} if MIRI else set())
+    if user not in managers:
+        web.chat_postEphemeral(channel=channel, user=user, text='입고 등록은 담당자만 할 수 있어요.')
+        return
+    _inbound_wait.pop(key, None)
+    # `입고등록 인사총무 9/18` → 부서 + 기본 날짜(캡처에 주문일 헤더가 안 보이는 품목용)
+    toks = re.sub(r'^입고\s*등록', '', first).split()
+    day = ''
+    for tk in toks:
+        dd = sply.parse_date_cell(tk) if sply else None
+        if dd:
+            day = dd
+            toks.remove(tk)
+            break
+    dept = ' '.join(toks)
+    thread = event.get('ts')
+    web.chat_postMessage(channel=channel, thread_ts=thread, text=f'🔎 캡처 {len(images[:10])}장 읽는 중…')
+    import shutil
+    import purchase as pur
+    work = INBOUND_TMP / uuid.uuid4().hex
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        paths = []
+        for i, f in enumerate(images[:10]):
+            dest = work / f'capture_{i + 1}.{(f.get("filetype") or "png").lower()}'
+            if _download_slack_file(f, dest):
+                paths.append(dest)
+        if not paths:
+            web.chat_postMessage(channel=channel, thread_ts=thread,
+                                 text='이미지를 받지 못했어요. 봇의 `files:read` 권한을 확인해 주세요.')
+            return
+        allow_read_only = ['Bash', 'Write', 'Edit', 'NotebookEdit', 'Grep', 'Glob',
+                           'WebFetch', 'WebSearch', 'Task']
+        r = _run_claude(pur.CAPTURE_PROMPT + '\n'.join(str(x) for x in paths),
+                        str(uuid.uuid4()), True, 300, 'sonnet', str(work), [str(work)], allow_read_only)
+        rows = pur.parse_capture_json(r.stdout if r.returncode == 0 else '', dept)
+        for row in rows:
+            row['날짜'] = row['날짜'] or day
+    except Exception as e:
+        log(f'  capture inbound err: {e}')
+        rows = []
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if not rows:
+        web.chat_postMessage(channel=channel, thread_ts=thread,
+                             text='캡처에서 구매 품목을 못 읽었어요. 표로 붙여넣어 주세요.')
+        return
+    total = sum(r['금액'] for r in rows)
+    body = [f'🧾 *캡처에서 읽은 구매 {len(rows)}건* · 합계 {total:,}원' + (f' · 부서 {dept}' if dept else ''),
+            '```' + pur.rows_to_table(rows) + '```']
+    ready = all(r['부서'] for r in rows)
+    if any(not r['날짜'] for r in rows):
+        body.append('📅 날짜가 빈 줄은 오늘 날짜로 기록돼요. 주문일로 넣으려면 `@집사 입고등록 <부서> 9/18` 처럼 날짜를 적어 다시 올려주세요.')
+    if ready:
+        body.append('맞으면 이 메시지에 ✅ 눌러주세요(담당자) — 그때 기록해요. '
+                    '틀리면 위 표를 고쳐서 `@집사 입고등록` 다음 줄에 붙여넣어 주세요.')
+    else:
+        body.append('⚠️ 부서가 비어 있어요. `@집사 입고등록 <부서>` 로 캡처를 다시 올리거나, '
+                    '위 표의 부서 칸을 채워 `@집사 입고등록` 다음 줄에 붙여넣어 주세요.')
+    posted = web.chat_postMessage(channel=channel, thread_ts=thread, text='\n'.join(body), mrkdwn=True)
+    if ready:
+        d = _load_inbound_pending()
+        d[posted['ts']] = {'channel': channel, 'user': user, 'rows': rows,
+                           'expires': time.time() + 3 * 86400}   # ponytail: 3일 지나면 ✅ 무효
+        _save_inbound_pending(d)
+    log(f'  capture inbound: {len(rows)}건 합계 {total} ready={ready}')
+
+
+def _confirm_inbound(ch: str, ts: str, user: str) -> bool:
+    """캡처 미리보기에 담당자가 ✅ → 구매기록 저장. 처리했으면 True."""
+    d = _load_inbound_pending()
+    item = d.get(ts)
+    if not item or item['channel'] != ch:
+        return False
+    pcfg = _load_purchase_cfg() or {}
+    managers = set(pcfg.get('managers', [])) | ({MIRI} if MIRI else set())
+    if user not in managers:
+        return True
+    d.pop(ts)
+    _save_inbound_pending(d)
+    if not _record_purchase_rows(ch, item['rows'], pcfg, _load_supply_cfg() or {}, thread_ts=ts):
+        d[ts] = item                                   # 파일 잠김 등 → 다시 ✅ 가능하게 복구
+        _save_inbound_pending(d)
+    return True
+
+
+def _post_month_end_nudge(pcfg: dict, now) -> None:
+    """월말 영업일: 이번 달 구매기록 건수·합계와 비품신청 건수를 담당자에게 한 줄로."""
+    import purchase as pur
+    pstore = pur._sibling('purchase_store.py')
+    ym = f'{now.year:04d}{now.month:02d}'
+    log_path = Path(pcfg['folder']) / pcfg.get('purchase_log', '비품 구매기록_자동.xlsx')
+    try:
+        recs = [r for r in pstore.read_purchase_log(log_path)
+                if str(r.get('블록ID', '')).startswith(f'{ym}#')]
+    except Exception as e:
+        log(f'  nudge log read fail: {e}')
+        return
+    total = sum(pur._amt(r.get('금액')) for r in recs)
+    start = datetime(now.year, now.month, 1, tzinfo=now.tzinfo).timestamp()
+    asks, cursor = 0, None
+    try:
+        for _ in range(10):
+            kw = {'channel': pcfg['channel'], 'limit': 200, 'oldest': f'{start:.6f}'}
+            if cursor:
+                kw['cursor'] = cursor
+            resp = web.conversations_history(**kw)
+            asks += sum(1 for m in resp.get('messages', []) if '비품신청이 접수' in (m.get('text') or ''))
+            cursor = (resp.get('response_metadata') or {}).get('next_cursor')
+            if not cursor:
+                break
+    except Exception as e:
+        log(f'  nudge history fail: {e}')
+    who = ' '.join(f'<@{u}>' for u in pcfg.get('managers', []))
+    msg = (f'🧾 *{now.month}월 구매기록 점검* — 입고등록 {len(recs)}건 · 합계 {total:,}원 / 비품신청 {asks}건\n'
+           + ('⚠️ 이번 달 구매기록이 아직 없어요. ' if not recs and asks else '')
+           + '아직 입고등록 안 한 주문이 있으면 넣어주세요. 표(날짜 칸 가능)나 주문 캡처 모두 돼요. ' + who)
+    web.chat_postMessage(channel=pcfg['channel'], text=msg, mrkdwn=True)
+    log(f'월말 구매기록 점검 발송: {ym} 기록={len(recs)} 신청={asks}')
 
 
 def _default_prev_yyyymm() -> str:
@@ -1148,8 +1342,8 @@ def handle_supply_command(channel: str, user: str, text: str) -> bool:
             return _do_inbound_register(channel, body, cfg)
         _inbound_wait[key] = time.time() + 180          # 3분 내 다음 메시지를 표로
         web.chat_postMessage(channel=channel, mrkdwn=True, text=(
-            "📥 이어서 *구매표를 붙여넣어* 주세요 (3분 내, 이 채널에).\n"
-            "엑셀/그룹웨어에서 복사해 붙여도 돼요. 품명·수량만 있으면 됩니다."))
+            "📥 이어서 *구매표를 붙여넣거나 주문 캡처를 올려* 주세요 (3분 내, 이 채널에).\n"
+            "엑셀/그룹웨어에서 복사해 붙여도 돼요. 품명·수량만 있으면 되고, 날짜 칸이 있으면 그 날짜로 기록해요."))
         return True
 
     return False
@@ -1672,6 +1866,8 @@ def on_event(client: SocketModeClient, req: SocketModeRequest) -> None:
         # subtype: 봇 메시지 / 채널 join 등 무시 (None인 일반 메시지만)
         # 비동기로 처리 (handler 블로킹 방지)
         threading.Thread(target=handle_message, args=(event,), daemon=True).start()
+    elif event.get('type') == 'message' and event.get('subtype') == 'file_share':
+        threading.Thread(target=handle_file_share, args=(event,), daemon=True).start()
     elif event.get('type') == 'reaction_added':
         threading.Thread(target=handle_reaction, args=(event,), daemon=True).start()
 
@@ -1704,6 +1900,8 @@ def _handle_completion(ch: str, ts: str, user: str) -> None:
     name = _resolve_name(user)
     info = rmd.record_completion(ts, user, name)
     if not info:                                       # 알림 발사 메시지가 아니거나 이미 완료
+        if _confirm_inbound(ch, ts, user):             # 캡처 입고등록 미리보기에 ✅
+            return
         t = tsk.find_open_by_msg(ch, ts) if _tasks_enabled(ch) else None
         if t and tsk.close_task(t['id']):              # 미결 과제 메시지에 ✅
             try:
@@ -1949,6 +2147,19 @@ def _purchase_monthly_loop(web) -> None:
                         log(f'월간 분석 제안 발송: {yyyymm} status={res.get("status")}')
                     except Exception as e:
                         log(f'  월간 분석 제안 실패: {e}')
+                # 월말 영업일 nudge_hour 이후 1회: 이번 달 구매기록 점검
+                nh = sched.get('nudge_hour')
+                if nh is not None and rmd is not None:
+                    last_bd = rmd.effective_notify_date(now.year, now.month, 31)
+                    state = _load_purchase_state()
+                    if (now.date() == last_bd and now.hour >= int(nh)
+                            and state.get('nudge_fired') != key):
+                        try:
+                            _post_month_end_nudge(pcfg, now)
+                        except Exception as e:
+                            log(f'  월말 점검 실패: {e}')
+                        state['nudge_fired'] = key
+                        _save_purchase_state(state)
         except Exception as e:
             log(f'  purchase monthly loop err: {e}')
         time.sleep(1800)     # 30분마다 조건 점검
