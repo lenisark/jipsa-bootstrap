@@ -70,6 +70,24 @@ class ApprovalTest(unittest.TestCase):
         plain = str(self.a.build_card(tok, 'x'))
         self.assertNotIn('<@', plain)            # 기본 모드는 멘션 없음
 
+    def test_settle_tasks_closes_decided_gate_tasks(self):
+        # 게이트 훅이 남기던 상태: 승인 → '진행', 거부/만료 → '막힘', 대기 중 → '막힘'
+        ids = {}
+        for key, verdict in (('ok', True), ('no', False), ('exp', None), ('wait', None)):
+            tid = self.t.create_task('C1', f'승인대기: {key}', direction='a2h')
+            self.t.set_state(tid, '진행'); self.t.set_state(tid, '막힘')
+            tok = self.a.request_approval(tid, 'C1', key, approvers=['U'],
+                                          timeout_min=0 if key == 'exp' else 15)
+            if verdict is not None:
+                self.a.decide(tok, 'U', approve=verdict)
+                if verdict: self.t.set_state(tid, '진행')
+            ids[key] = tid
+        self.a.expire_stale()
+        self.assertEqual(self.a.settle_tasks(), 3)
+        st = {k: self.t.get_task(v)['state'] for k, v in ids.items()}
+        self.assertEqual(st, {'ok': '완료', 'no': '취소', 'exp': '취소', 'wait': '막힘'})
+        self.assertEqual(self.a.settle_tasks(), 0)          # 두 번 불러도 그대로
+
 
 if __name__ == '__main__':
     unittest.main()
