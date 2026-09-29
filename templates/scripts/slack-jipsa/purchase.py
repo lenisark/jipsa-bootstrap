@@ -68,7 +68,15 @@ def classify_with_cache(items, cache: dict, run_claude, guide_text: str = ''):
 
 REC_HEADERS = ['일자','부서','용도','카테고리','품목','수량','단가','금액']
 
-def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
+def decide_use(llm_use: str, dept: str, shared_depts) -> str:
+    """분류 가이드의 용도 규칙: 재판매·대고객은 품목으로(LLM 판단 유지), 공용은 발주 부서로
+    (shared_depts, 예: 매입부·제휴매입파트), 나머지는 사내비품. shared_depts=None 이면 LLM 판단 그대로."""
+    if shared_depts is None or llm_use == '재판매·대고객':
+        return llm_use
+    return '공용(사내·외부 혼재)' if dept in shared_depts else '사내비품'
+
+
+def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases, shared_depts=None):
     recs, warns = [], []
     for r in rows:
         name = (r.get('품명') or '').strip()
@@ -80,7 +88,8 @@ def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
         if is_new and dept:
             warns.append(f'신규 부서 후보: "{dept}" (마스터에 없음)')
         cls = classify_map.get(name, {'용도':'사내비품','카테고리':'기타'})
-        recs.append({'일자': r.get('날짜') or when_ymd, '부서': dept, '용도': cls['용도'],
+        recs.append({'일자': r.get('날짜') or when_ymd, '부서': dept,
+                     '용도': decide_use(cls['용도'], dept, shared_depts),
                      '카테고리': cls['카테고리'], '품목': name, '수량': qty,
                      '단가': round(amt/qty) if qty > 0 else 0, '금액': amt})
     return recs, warns
@@ -132,6 +141,26 @@ def _sibling(mod_file):
     spec = importlib.util.spec_from_file_location(mod_file[:-3], Path(__file__).with_name(mod_file))
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
+def load_guide_text(cfg, max_chars: int = 3000) -> str:
+    """최신 분석 파일의 '분류_가이드' 시트를 줄글로(분류 프롬프트에 주입). 없거나 못 읽으면 ''."""
+    try:
+        import openpyxl
+        pstore = _sibling('purchase_store.py')
+        path, _ = pstore.latest_analysis(cfg['folder'], cfg.get('analysis_prefix', ''))
+        if not path:
+            return ''
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        if '분류_가이드' not in wb.sheetnames:
+            wb.close()
+            return ''
+        lines = [' | '.join(str(c).strip() for c in r if c not in (None, ''))
+                 for r in wb['분류_가이드'].iter_rows(values_only=True)]
+        wb.close()
+        return '\n'.join(ln for ln in lines if ln)[:max_chars]
+    except Exception:
+        return ''
+
+
 def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
     """붙여넣기 행들 → 분류 → 데몬 전용 누적 구매로그에 append(사람 양식 미접촉).
     반환 {'appended','records'(로그행),'warns','error'}."""
@@ -145,9 +174,12 @@ def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
     except Exception:
         cache = {}
     names = [(r.get('품명') or '').strip() for r in rows if (r.get('품명') or '').strip()]
-    cmap, cache2 = classify_with_cache(names, cache, run_claude, cfg.get('guide_text',''))
+    # 분류_가이드 시트 주입은 guide_sheet: true 일 때만(가이드 문구와 팀 관행이 다를 수 있어 opt-in)
+    guide = cfg.get('guide_text') or (load_guide_text(cfg) if cfg.get('guide_sheet') else '')
+    cmap, cache2 = classify_with_cache(names, cache, run_claude, guide)
     recs, warns = build_records(rows, cmap, when_ymd,
-                                cfg.get('known_depts', []), cfg.get('dept_aliases', {}))
+                                cfg.get('known_depts', []), cfg.get('dept_aliases', {}),
+                                cfg.get('shared_use_depts'))
     # 월·블록ID는 행 일자 기준(날짜 칸 없으면 붙여넣은 날). seq는 그 달 기존 로그 건수에서 이어짐.
     existing = pstore.read_purchase_log(log_path)
     seqs: dict[str, int] = {}
