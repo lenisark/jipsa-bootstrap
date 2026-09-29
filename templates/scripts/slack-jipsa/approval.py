@@ -83,6 +83,19 @@ def expire_stale() -> int:
         return cur.rowcount
 
 
+def settle_tasks() -> int:
+    """결론 난 승인 요청(승인·거부·만료)의 작업이 아직 열려 있으면 닫는다 — 승인=완료, 거부·만료=취소.
+    게이트 훅이 승인 뒤 '진행'으로만 두거나, 거부·타임아웃·훅 비정상 종료로 '막힘'에 남던 것을 정리.
+    (sweeper 가 30초마다 호출. 시스템 정산이라 상태기계 전이 규칙을 거치지 않고 직접 갱신)"""
+    now = int(time.time())
+    sql = ("UPDATE tasks SET state=?, updated_at=? WHERE state IN ('대기','진행','막힘') AND id IN "
+           "(SELECT task_id FROM approvals WHERE status IN ({}))")
+    with closing(_conn()) as c, c:
+        done = c.execute(sql.format("'승인'"), ('완료', now)).rowcount
+        dropped = c.execute(sql.format("'거부','만료'"), ('취소', now)).rowcount
+    return done + dropped
+
+
 def list_expired_since(since_ts: int) -> list[dict]:
     """sweeper가 알림 보낼 대상: 최근 만료된 행."""
     with closing(_conn()) as c, c:

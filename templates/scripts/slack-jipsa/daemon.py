@@ -2090,6 +2090,7 @@ def _gate_sweeper() -> None:
                     except Exception:
                         pass
             last = int(time.time())
+            apv.settle_tasks()          # 결론 난 승인 요청의 작업 닫기(승인=완료, 거부·만료=취소)
         except Exception as e:
             log(f'  sweeper err: {e}')
 
