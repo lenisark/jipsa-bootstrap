@@ -33,8 +33,15 @@ SLACK_URL="${SLACK_SESSION_WEBHOOK:-}"
 NOTION_TOKEN="${NOTION_API_TOKEN:-}"
 NOTION_DB="${NOTION_SESSION_DB:-}"
 NOTION_VERSION="${NOTION_VERSION:-2022-06-28}"
+# 봇 토큰 + 채널이 있으면 chat.postMessage 로 보내 같은 요청의 후속 보고를 스레드로 묶는다(없으면 웹훅).
+# env 에 없으면 데몬 시크릿 파일에서 두 값만 읽는다.
+_SECRETS="$HOME/.claude/secrets/slack-jipsa.env"
+_secret() { [[ -f "$_SECRETS" ]] && grep -E "^$1=" "$_SECRETS" | head -1 | cut -d= -f2- | tr -d '\r'; }
+BOT_TOKEN="${SLACK_BOT_TOKEN:-$(_secret SLACK_BOT_TOKEN)}"
+SESSION_CH="${SLACK_SESSION_CHANNEL:-${SLACK_CHANNEL:-$(_secret SLACK_CHANNEL)}}"
+THREAD_DIR="$HOME/.claude/scripts/slack-jipsa/session_threads"
 
-if [[ -z "$SLACK_URL" && -z "$NOTION_TOKEN" ]]; then
+if [[ -z "$SLACK_URL" && -z "$NOTION_TOKEN" && ( -z "$BOT_TOKEN" || -z "$SESSION_CH" ) ]]; then
   exit 0  # 어떤 대상도 설정 없으면 조용히 종료
 fi
 
@@ -165,6 +172,7 @@ extract_turn_data() {
     | ($assistant_texts | join("\n\n")) as $assistant_text_all
     | ($turn | map(.timestamp // "" | epoch) | map(select(. != null))) as $times
     | {
+        turn_key: ($turn[0].uuid // ($user_prompt_full | .[0:200])),
         task: ($user_prompt_full | .[0:200]),
         actions: summarize_names($tool_names),
         result: ($assistant_text_full | .[0:200]),
@@ -195,6 +203,7 @@ ACTION_ITEMS_MD="없음"
 RAW_FULL=$(printf '%s' "$TURN_DATA" | jq -r '.raw_full // ""')
 TOOL_COUNT=$(printf '%s' "$TURN_DATA" | jq -r '.metadata.tool_count // 0')
 DURATION_SEC=$(printf '%s' "$TURN_DATA" | jq -r '.metadata.duration_sec // 0')
+TURN_KEY=$(printf '%s' "$TURN_DATA" | jq -r '.turn_key // ""')
 
 if [[ -z "$TASK" && "${TOOL_COUNT:-0}" -eq 0 ]]; then
   exit 0
@@ -215,7 +224,7 @@ _log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HOOK_LOG" 2
 _log "hook start session=$SESSION_ID project=$PROJECT_NAME tool_count=$TOOL_COUNT duration_sec=$DURATION_SEC raw_full_bytes=${#RAW_FULL} slack=$([ -n "$SLACK_URL" ] && echo Y || echo N) notion=$([ -n "$NOTION_TOKEN" ] && echo Y || echo N)"
 
 # ── Slack 전송 ─────────────────────────────────────────────────────
-if [[ -n "$SLACK_URL" ]]; then
+if [[ -n "$SLACK_URL" || ( -n "$BOT_TOKEN" && -n "$SESSION_CH" ) ]]; then
   TS_HM=$(TZ=Asia/Seoul date '+%H:%M')
   SHORT_SESSION="${SESSION_ID:0:8}"
   SLACK_BODY=$(cat <<SB
@@ -267,9 +276,48 @@ SB
       text: "Claude 턴 · \($project)"
     }')
 
-  curl -sS -X POST "$SLACK_URL" \
-    -H 'Content-Type: application/json' \
-    -d "$SLACK_PAYLOAD" >/dev/null 2>&1 || true
+  _slack_api() {   # $1=method $2=json body → 응답 json
+    curl -sS -X POST "https://slack.com/api/$1" \
+      -H 'Content-Type: application/json; charset=utf-8' \
+      -H "Authorization: Bearer $BOT_TOKEN" -d "$2" 2>/dev/null
+  }
+  SENT=0
+  if [[ -n "$BOT_TOKEN" && -n "$SESSION_CH" ]]; then
+    # 같은 사용자 요청(마지막 실제 사용자 입력)에서 이어진 턴이면 첫 보고의 스레드로. 세션당 파일 1개.
+    mkdir -p "$THREAD_DIR"
+    STATE="$THREAD_DIR/${SESSION_ID}.json"
+    PREV_KEY=$(jq -r '.key // ""' "$STATE" 2>/dev/null)
+    PREV_TS=$(jq -r '.ts // ""' "$STATE" 2>/dev/null)
+    if [[ -n "$TURN_KEY" && "$TURN_KEY" == "$PREV_KEY" && -n "$PREV_TS" ]]; then
+      N=$(( $(jq -r '.n // 0' "$STATE") + 1 ))
+      _slack_api chat.postMessage "$(jq -n --arg ch "$SESSION_CH" --arg ts "$PREV_TS" \
+        --arg t "🔁 *후속 보고 $N* · ⏰ $TS_HM"$'\n'"📝 $ACTIONS_MD"$'\n'"🧠 $RESULT_TXT" \
+        '{channel:$ch, thread_ts:$ts, text:$t}')" >/dev/null
+      # 채널에서도 최신 결과가 보이게 첫 보고 아래 한 줄 갱신
+      _slack_api chat.update "$(jq --arg ch "$SESSION_CH" --arg ts "$PREV_TS" \
+        --arg t "🔁 후속 ${N}건 · 마지막 $TS_HM — ${RESULT_TXT:0:120}" \
+        '{channel:$ch, ts:$ts, text:"Claude 턴", blocks:(.blocks + [{type:"context", elements:[{type:"mrkdwn", text:$t}]}])}' \
+        "$STATE")" >/dev/null
+      jq --argjson n "$N" '.n = $n' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+      SENT=1; _log "slack thread reply n=$N"
+    else
+      RESP=$(_slack_api chat.postMessage "$(printf '%s' "$SLACK_PAYLOAD" | jq --arg ch "$SESSION_CH" '. + {channel:$ch}')")
+      NEW_TS=$(printf '%s' "$RESP" | jq -r 'if .ok then .ts else "" end' 2>/dev/null)
+      if [[ -n "$NEW_TS" ]]; then
+        printf '%s' "$SLACK_PAYLOAD" | jq --arg k "$TURN_KEY" --arg ts "$NEW_TS" \
+          '{key:$k, ts:$ts, blocks:.blocks, n:0}' > "$STATE"
+        SENT=1; _log "slack posted (bot)"
+      else
+        _log "slack bot error: $(printf '%s' "$RESP" | jq -r '.error // "?"' 2>/dev/null) — 웹훅으로 대신 보냄"
+      fi
+    fi
+    find "$THREAD_DIR" -name '*.json' -mtime +7 -delete 2>/dev/null || true   # 7일 지난 세션 상태 정리
+  fi
+  if [[ "$SENT" == 0 && -n "$SLACK_URL" ]]; then
+    curl -sS -X POST "$SLACK_URL" \
+      -H 'Content-Type: application/json' \
+      -d "$SLACK_PAYLOAD" >/dev/null 2>&1 || true
+  fi
 fi
 
 # ── Notion 전송 ─────────────────────────────────────────────────────

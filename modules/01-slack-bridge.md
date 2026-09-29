@@ -214,6 +214,8 @@ chmod +x ~/.claude/hooks/slack-session-summary.sh
 }
 ```
 
+**후속 보고 스레드 묶기 (자동)** — 봇 토큰(`SLACK_BOT_TOKEN`)과 채널(`SLACK_SESSION_CHANNEL`, 없으면 `SLACK_CHANNEL`)이 있으면 웹훅 대신 봇으로 보낸다. env에 없으면 `~/.claude/secrets/slack-jipsa.env`에서 읽는다. 같은 요청에서 이어진 턴(백그라운드 작업 알림으로 다시 돈 턴 등)은 첫 보고의 **스레드 답글**로 달리고, 첫 보고 아래에 `🔁 후속 N건 · 마지막 HH:MM — 최신 결과` 한 줄이 갱신돼 채널만 봐도 최신 결과가 보인다. 세션별 상태는 `~/.claude/scripts/slack-jipsa/session_threads/<세션ID>.json`(7일 뒤 정리). 봇 전송이 실패하면 웹훅으로 보낸다. 봇이 그 채널 멤버여야 한다.
+
 > Stop hook은 슬랙 webhook (`SLACK_SESSION_WEBHOOK`) 또는 노션 둘 다 비어있으면 조용히 종료. 사용자가 webhook을 만들지 않았으면 일단 빈 값. (모듈 1 만으로는 슬랙 보고 안 됨. 모듈 4 또는 webhook 추가 필요.)
 
 #### Incoming Webhook 만드는 법 (선택)
