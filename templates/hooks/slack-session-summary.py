@@ -98,7 +98,8 @@ if last_user_idx is None:
     sys.exit(0)
 
 turn = ua_entries[last_user_idx:]
-user_prompt = get_text_content(turn[0].get('message', {}).get('content', ''))[:200]
+prompt_full = get_text_content(turn[0].get('message', {}).get('content', ''))
+user_prompt = prompt_full[:200]
 
 tool_names = []
 assistant_texts = []
@@ -130,7 +131,27 @@ actions_md = ', '.join(
     for n in tool_order
 ) or '(도구 없음)'
 
-result_txt = (assistant_texts[-1] if assistant_texts else '')[:200]
+result_full = assistant_texts[-1] if assistant_texts else ''
+
+
+def to_mrkdwn(t: str) -> str:
+    """GitHub 마크다운 → 슬랙 mrkdwn (.sh 의 sed 변환과 같음): **굵게**, # 제목, [글](링크), ~~취소선~~."""
+    import re
+    t = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', t)
+    t = re.sub(r'(?m)^\s*#{1,6}\s+(.+)$', r'*\1*', t)
+    t = re.sub(r'\[([^\]\[]+)\]\(([^)\s]+)\)', r'<\2|\1>', t)
+    return re.sub(r'~~([^~]+)~~', r'~\1~', t)
+
+
+def clip(t: str, n: int) -> str:
+    """n자 넘으면 자르고 … 표시(슬랙 섹션 한도 3000자 안에 들도록)."""
+    t = (t or '').strip()
+    return t if len(t) <= n else t[:n].rstrip() + ' …'
+
+
+result_txt = clip(to_mrkdwn(result_full), 1500)        # 첫 보고(요청문과 한 칸)
+result_reply = clip(to_mrkdwn(result_full), 3000)      # 후속 스레드 답글
+result_line = clip(result_full.strip().split('\n')[0], 120)   # 첫 보고 아래 한 줄
 tool_count = len(tool_names)
 
 if not user_prompt and tool_count == 0:
@@ -157,7 +178,7 @@ def log(msg):
 log(f'hook start session={session_id} project={project_name} tool_count={tool_count}')
 
 slack_body = (
-    f"🎯 *시킨 일*\n{user_prompt}\n\n"
+    f"🎯 *시킨 일*\n{clip(prompt_full, 300)}\n\n"
     f"📝 *한 일*\n{actions_md}\n\n"
     f"🧠 *결과*\n{result_txt}\n\n"
     f"⚠️ *확인 필요*\n없음"
@@ -199,10 +220,10 @@ if BOT_TOKEN and SESSION_CH:
             n = int(state.get('n', 0)) + 1
             slack_api('chat.postMessage', {
                 'channel': SESSION_CH, 'thread_ts': state['ts'],
-                'text': f"🔁 *후속 보고 {n}* · ⏰ {ts_hm}\n📝 {actions_md}\n🧠 {result_txt}"})
+                'text': f"🔁 *후속 보고 {n}* · ⏰ {ts_hm}\n📝 {actions_md}\n🧠 {result_reply}"})
             # 채널에서도 최신 결과가 보이게 첫 보고 아래 한 줄 갱신
             blocks = state['blocks'] + [{"type": "context", "elements": [{"type": "mrkdwn",
-                     "text": f"🔁 후속 {n}건 · 마지막 {ts_hm} — {result_txt[:120]}"}]}]
+                     "text": f"🔁 후속 {n}건 · 마지막 {ts_hm} — {result_line}"}]}]
             slack_api('chat.update', {'channel': SESSION_CH, 'ts': state['ts'],
                                       'blocks': blocks, 'text': payload['text']})
             state['n'] = n

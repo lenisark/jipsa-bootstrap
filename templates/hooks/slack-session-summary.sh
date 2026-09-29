@@ -173,9 +173,9 @@ extract_turn_data() {
     | ($turn | map(.timestamp // "" | epoch) | map(select(. != null))) as $times
     | {
         turn_key: ($turn[0].uuid // ($user_prompt_full | .[0:200])),
-        task: ($user_prompt_full | .[0:200]),
+        task: ($user_prompt_full | if length > 300 then .[0:300] + " …" else . end),
         actions: summarize_names($tool_names),
-        result: ($assistant_text_full | .[0:200]),
+        result: ($assistant_text_full | if length > 1500 then .[0:1500] + " …" else . end),
         action_items: [],
         raw_full: (
           ($user // "사용자") + "\n" + ($user_prompt_full // "") +
@@ -246,11 +246,17 @@ SB
   # 2) # / ## ~ ###### Header → *Header*
   # 3) [text](url) → <url|text>
   # 4) ~~strike~~ → ~strike~
-  SLACK_BODY=$(printf '%s' "$SLACK_BODY" \
-    | sed -E 's/\*\*([^*]+)\*\*/*\1*/g' \
-    | sed -E 's/^[[:space:]]*#{1,6}[[:space:]]+(.+)$/*\1*/' \
-    | sed -E 's/\[([^][]+)\]\(([^)[:space:]]+)\)/<\2|\1>/g' \
-    | sed -E 's/~~([^~]+)~~/~\1~/g')
+  _md() {
+    printf '%s' "$1" \
+      | sed -E 's/\*\*([^*]+)\*\*/*\1*/g' \
+      | sed -E 's/^[[:space:]]*#{1,6}[[:space:]]+(.+)$/*\1*/' \
+      | sed -E 's/\[([^][]+)\]\(([^)[:space:]]+)\)/<\2|\1>/g' \
+      | sed -E 's/~~([^~]+)~~/~\1~/g'
+  }
+  SLACK_BODY=$(_md "$SLACK_BODY")
+  # 첫 보고 아래 한 줄(결과 첫 줄, 120자) — 넘치면 … 표시
+  RESULT_LINE=$(printf '%s' "$RESULT_TXT" | head -1)
+  [[ ${#RESULT_LINE} -gt 120 ]] && RESULT_LINE="${RESULT_LINE:0:120} …"
 
   SLACK_PAYLOAD=$(jq -n \
     --arg project "$PROJECT_NAME" \
@@ -291,11 +297,11 @@ SB
     if [[ -n "$TURN_KEY" && "$TURN_KEY" == "$PREV_KEY" && -n "$PREV_TS" ]]; then
       N=$(( $(jq -r '.n // 0' "$STATE") + 1 ))
       _slack_api chat.postMessage "$(jq -n --arg ch "$SESSION_CH" --arg ts "$PREV_TS" \
-        --arg t "🔁 *후속 보고 $N* · ⏰ $TS_HM"$'\n'"📝 $ACTIONS_MD"$'\n'"🧠 $RESULT_TXT" \
+        --arg t "🔁 *후속 보고 $N* · ⏰ $TS_HM"$'\n'"📝 $ACTIONS_MD"$'\n'"🧠 $(_md "$RESULT_TXT")" \
         '{channel:$ch, thread_ts:$ts, text:$t}')" >/dev/null
       # 채널에서도 최신 결과가 보이게 첫 보고 아래 한 줄 갱신
       _slack_api chat.update "$(jq --arg ch "$SESSION_CH" --arg ts "$PREV_TS" \
-        --arg t "🔁 후속 ${N}건 · 마지막 $TS_HM — ${RESULT_TXT:0:120}" \
+        --arg t "🔁 후속 ${N}건 · 마지막 $TS_HM — $RESULT_LINE" \
         '{channel:$ch, ts:$ts, text:"Claude 턴", blocks:(.blocks + [{type:"context", elements:[{type:"mrkdwn", text:$t}]}])}' \
         "$STATE")" >/dev/null
       jq --argjson n "$N" '.n = $n' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
