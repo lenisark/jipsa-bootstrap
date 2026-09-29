@@ -67,11 +67,18 @@ def get_text_content(content):
         )
     return ''
 
+def image_count(content):
+    return sum(1 for i in content if isinstance(i, dict) and i.get('type') == 'image') \
+        if isinstance(content, list) else 0
+
+
 def is_real_user(entry):
-    if entry.get('type') != 'user':
+    # isMeta: Claude Code 가 이미지 첨부 뒤에 붙이는 '[Image: source: 경로]' 내부 기록 → 사용자 입력 아님
+    if entry.get('type') != 'user' or entry.get('isMeta'):
         return False
-    txt = get_text_content(entry.get('message', {}).get('content', '')).strip()
-    if not txt:
+    content = entry.get('message', {}).get('content', '')
+    txt = get_text_content(content).strip()
+    if not txt and not image_count(content):
         return False
     if txt.startswith('<task-notification>'):
         return False
@@ -98,8 +105,14 @@ if last_user_idx is None:
     sys.exit(0)
 
 turn = ua_entries[last_user_idx:]
-prompt_full = get_text_content(turn[0].get('message', {}).get('content', ''))
+_content = turn[0].get('message', {}).get('content', '')
+prompt_full = get_text_content(_content)
 user_prompt = prompt_full[:200]
+# 표시용: 첨부 이미지는 장수로, 혹시 남은 '[Image: source: 경로]' 표기는 짧게
+_imgs = image_count(_content)
+import re as _re
+prompt_show = ((f'🖼️ 이미지 {_imgs}장\n' if _imgs else '')
+               + _re.sub(r'\[Image: source: [^\]]*\]', '(이미지 첨부)', prompt_full)).strip()
 
 tool_names = []
 assistant_texts = []
@@ -210,7 +223,7 @@ def log(msg):
 log(f'hook start session={session_id} project={project_name} tool_count={tool_count}')
 
 slack_body = (
-    f"🎯 *시킨 일*\n{clip(prompt_full, 300)}\n\n"
+    f"🎯 *시킨 일*\n{clip(prompt_show, 300)}\n\n"
     f"📝 *한 일*\n{actions_md}\n\n"
     f"🧠 *결과*\n{result_txt}\n\n"
     f"⚠️ *확인 필요*\n없음"

@@ -63,9 +63,9 @@ TURN_INDEX=$(jq -rs '
       | join("\n")
     else "" end;
   def is_real_user:
-    .type == "user"
+    .type == "user" and (.isMeta != true)
     and ((.message.content | text_content) as $txt
-      | (($txt | gsub("[[:space:]]"; "")) != "")
+      | ((($txt | gsub("[[:space:]]"; "")) != "") or ((.message.content | if type == "array" then map(select(type == "object" and .type == "image")) | length else 0 end) > 0))
       and (($txt | test("^\\s*<task-notification>")) | not));
   map(select(.type == "user") | select(is_real_user)) | length
 ' "$TRANSCRIPT" 2>/dev/null || echo "0")
@@ -81,9 +81,9 @@ SESSION_MODEL=$(jq -rs '
       | join("\n")
     else "" end;
   def is_real_user:
-    .type == "user"
+    .type == "user" and (.isMeta != true)
     and ((.message.content | text_content) as $txt
-      | (($txt | gsub("[[:space:]]"; "")) != "")
+      | ((($txt | gsub("[[:space:]]"; "")) != "") or ((.message.content | if type == "array" then map(select(type == "object" and .type == "image")) | length else 0 end) > 0))
       and (($txt | test("^\\s*<task-notification>")) | not));
   map(select(.type == "user" or .type == "assistant"))
   | (. as $all
@@ -118,9 +118,9 @@ extract_turn_data() {
       else "" end;
 
     def is_real_user:
-      .type == "user"
+      .type == "user" and (.isMeta != true)
       and ((.message.content | text_content) as $txt
-        | (($txt | gsub("[[:space:]]"; "")) != "")
+        | ((($txt | gsub("[[:space:]]"; "")) != "") or ((.message.content | if type == "array" then map(select(type == "object" and .type == "image")) | length else 0 end) > 0))
         and (($txt | test("^\\s*<task-notification>")) | not));
 
     def epoch:
@@ -173,7 +173,10 @@ extract_turn_data() {
     | ($turn | map(.timestamp // "" | epoch) | map(select(. != null))) as $times
     | {
         turn_key: ($turn[0].uuid // ($user_prompt_full | .[0:200])),
-        task: ($user_prompt_full | if length > 300 then .[0:300] + " …" else . end),
+        task: (($turn[0].message.content | if type == "array" then map(select(type == "object" and .type == "image")) | length else 0 end) as $imgs
+               | ((if $imgs > 0 then "🖼️ 이미지 \($imgs)장\n" else "" end)
+                  + ($user_prompt_full | gsub("\\[Image: source: [^\\]]*\\]"; "(이미지 첨부)")))
+               | if length > 300 then .[0:300] + " …" else . end),
         actions: summarize_names($tool_names),
         result: ($assistant_text_full | if length > 1500 then .[0:1500] + " …" else . end),
         action_items: [],
