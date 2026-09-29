@@ -134,9 +134,41 @@ actions_md = ', '.join(
 result_full = assistant_texts[-1] if assistant_texts else ''
 
 
-def to_mrkdwn(t: str) -> str:
-    """GitHub 마크다운 → 슬랙 mrkdwn (.sh 의 sed 변환과 같음): **굵게**, # 제목, [글](링크), ~~취소선~~."""
+def tables_to_lists(t: str) -> str:
+    """마크다운 표 → 목록(슬랙엔 표가 없음). `• *첫 칸* — 머리글: 값 · 머리글: 값`.
+    2번째 줄이 |---| 구분선인 `|` 블록만 표로 본다(.sh 의 awk 변환과 같음)."""
     import re
+    out, rows = [], []
+
+    def cells(line):
+        return [c.strip() for c in line.strip().strip('|').split('|')]
+
+    def flush():
+        if len(rows) >= 2 and re.fullmatch(r'[\s|:\-]+', rows[1]) and '-' in rows[1]:
+            head = cells(rows[0])
+            for r in rows[2:]:
+                c = cells(r)
+                rest = [f'{h}: {v}' if h else v for h, v in zip(head[1:], c[1:]) if v]
+                out.append(f'• *{c[0]}*' + (' — ' + ' · '.join(rest) if rest else ''))
+        else:
+            out.extend(rows)
+        rows.clear()
+
+    for line in t.split('\n'):
+        s = line.strip()
+        if len(s) > 1 and s.startswith('|') and s.endswith('|'):
+            rows.append(line)
+        else:
+            flush()
+            out.append(line)
+    flush()
+    return '\n'.join(out)
+
+
+def to_mrkdwn(t: str) -> str:
+    """GitHub 마크다운 → 슬랙 mrkdwn (.sh 와 같음): 표→목록, **굵게**, # 제목, [글](링크), ~~취소선~~."""
+    import re
+    t = tables_to_lists(t)
     t = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', t)
     t = re.sub(r'(?m)^\s*#{1,6}\s+(.+)$', r'*\1*', t)
     t = re.sub(r'\[([^\]\[]+)\]\(([^)\s]+)\)', r'<\2|\1>', t)
