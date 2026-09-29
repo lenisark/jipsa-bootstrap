@@ -792,19 +792,29 @@ def record_completion(ts: str, user: str, name: str):
     return info
 
 
+def _weekday_holiday(d: date) -> bool:
+    """평일인데 쉬는 날(공휴일·대체휴일·extra_holidays)."""
+    return d.weekday() < 5 and is_non_working(d)
+
+
 def _due_today(r: dict, today: date):
     """오늘 발사 대상이면 (target, eff) 반환, 아니면 None."""
     freq = r.get('freq', 'monthly')
     if freq == 'daily':
         return (today, today)
     if freq == 'weekdays':
-        if today.weekday() in set(r.get('weekdays') or []):
+        # 평일 휴일(공휴일·대체휴일)은 건너뜀. 주말을 지정한 알림은 그대로.
+        if today.weekday() in set(r.get('weekdays') or []) and not _weekday_holiday(today):
             return (today, today)
         return None
     if freq == 'weekly':
-        if today.weekday() == int(r.get('weekday', 0)):
-            return (today, today)
-        return None
+        # 이번 주 지정 요일이 평일 휴일이면 다음 영업일로 미룸(예: 대체휴일 월요일 → 화요일)
+        wd = int(r.get('weekday', 0))
+        target = today - timedelta(days=(today.weekday() - wd) % 7)
+        eff = target
+        while _weekday_holiday(target) and is_non_working(eff) and eff < target + timedelta(days=7):
+            eff += timedelta(days=1)
+        return (target, today) if eff == today else None
     if freq == 'once':
         try:
             target = date.fromisoformat(r['once_date'])
