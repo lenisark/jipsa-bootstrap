@@ -11,6 +11,6 @@
                   "네트웍스", "CX파트", "상무님", "대표님", "재무회계"],
   "dept_aliases": {"영업1본부": "영업본부", "영업2본부": "영업본부", "영업5본부": "영업본부", "손님용": "인사총무"},
   "managers": ["U0ANN3GJRDE"],
-  "schedule": { "enabled": true, "day": 5, "hour": 10 },
+  "schedule": { "enabled": true, "day": 5, "hour": 10, "nudge_hour": 15 },
   "dry_run": true
 }

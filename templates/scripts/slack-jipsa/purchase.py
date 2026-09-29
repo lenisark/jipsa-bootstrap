@@ -80,7 +80,7 @@ def build_records(rows, classify_map, when_ymd, known_depts, dept_aliases):
         if is_new and dept:
             warns.append(f'신규 부서 후보: "{dept}" (마스터에 없음)')
         cls = classify_map.get(name, {'용도':'사내비품','카테고리':'기타'})
-        recs.append({'일자': when_ymd, '부서': dept, '용도': cls['용도'],
+        recs.append({'일자': r.get('날짜') or when_ymd, '부서': dept, '용도': cls['용도'],
                      '카테고리': cls['카테고리'], '품목': name, '수량': qty,
                      '단가': round(amt/qty) if qty > 0 else 0, '금액': amt})
     return recs, warns
@@ -148,18 +148,21 @@ def apply_purchase_record(cfg, rows, run_claude, when_ymd) -> dict:
     cmap, cache2 = classify_with_cache(names, cache, run_claude, cfg.get('guide_text',''))
     recs, warns = build_records(rows, cmap, when_ymd,
                                 cfg.get('known_depts', []), cfg.get('dept_aliases', {}))
-    yyyymm = when_ymd[:7].replace('-', '')
-    month_label = f'{int(yyyymm[4:6])}월'
-    # 블록ID seq: 그 달 기존 로그 건수에서 이어짐(재실행/중복 추적용, 고유)
+    # 월·블록ID는 행 일자 기준(날짜 칸 없으면 붙여넣은 날). seq는 그 달 기존 로그 건수에서 이어짐.
     existing = pstore.read_purchase_log(log_path)
-    seq = sum(1 for r in existing if str(r.get('월', '')).strip() == month_label) + 1
+    seqs: dict[str, int] = {}
     log_rows = []
     for rec in recs:
+        yyyymm = rec['일자'][:7].replace('-', '')
+        month_label = f'{int(yyyymm[4:6])}월'
+        if yyyymm not in seqs:
+            seqs[yyyymm] = sum(1 for r in existing
+                               if str(r.get('블록ID', '')).startswith(f'{yyyymm}#')) + 1
         log_rows.append({'월': month_label, '일자': rec['일자'], '부서': rec['부서'],
                          '용도': rec['용도'], '카테고리': rec['카테고리'], '품목': rec['품목'],
                          '수량': rec['수량'], '단가': rec['단가'], '금액': rec['금액'],
-                         '블록ID': f'{yyyymm}#{seq}'})
-        seq += 1
+                         '블록ID': f'{yyyymm}#{seqs[yyyymm]}'})
+        seqs[yyyymm] += 1
     n = pstore.append_purchase_log(log_path, log_rows)
     if cache2 != cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,3 +210,52 @@ def merge_month_into_analysis(cfg, yyyymm, when_ymd, dry_run=True) -> dict:
     pstore.write_merged_analysis(analysis, out, new_rows, pivots)
     return {'status': 'merged', 'month': month_label, 'rows': len(new_rows),
             'out': str(out), 'summary': summary}
+
+
+# ── 주문 캡처 → 구매행 (2026-09) ────────────────────────────────────
+CAPTURE_PROMPT = (
+    "다음 이미지들은 쿠팡 등 온라인몰 주문목록 캡처다. 각 이미지를 Read 도구로 열어 구매 품목을 "
+    "JSON 배열로만 출력하라. 각 원소는 "
+    '{"품명": 상품명(핵심 옵션 포함, 40자 이내), "수량": 정수, "단가": 정수(원), "날짜": "YYYY-MM-DD"}.\n'
+    "규칙:\n"
+    "- 쿠팡의 'N,NNN 원 · K개'는 1개당 가격(단가)과 수량이다.\n"
+    "- 'K개 중 1개'라고 적힌 카드는 한 상품(수량 K)을 나눠 배송한 것이다. 같은 상품의 그런 카드가 여러 장이면 "
+    "한 번만, 수량 K로 적는다.\n"
+    "- '분리 배송'·'분리배송된 상품' 표시가 있는 같은 상품의 '1개' 카드 여러 장은 한 상품을 나눠 보낸 것이니 한 번만 적는다.\n"
+    "- 그 밖의 카드는 각각 적는다. 이미지끼리 겹쳐 같은 카드가 두 번 보이면 한 번만 적는다.\n"
+    "- 날짜는 '2026. 9. 17 주문' 같은 주문일 헤더를 따른다. 헤더가 안 보이면 빈 문자열(도착일로 추정하지 말 것).\n"
+    "- 취소·반품된 카드는 뺀다. JSON 외에는 아무것도 출력하지 마라.\n\n이미지 파일:\n")
+
+
+def parse_capture_json(out: str, dept: str = '') -> list[dict]:
+    """캡처 판독 결과(JSON) → 구매표 행 [{품명,수량,금액,부서,날짜}]. 금액 = 단가×수량."""
+    m = re.search(r'\[.*\]', out or '', re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return []
+    rows = []
+    for d in data if isinstance(data, list) else []:
+        if not isinstance(d, dict) or not str(d.get('품명', '')).strip():
+            continue
+        try:
+            qty = int(d.get('수량') or 0)
+            unit = _amt(d.get('단가'))
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or unit <= 0:
+            continue
+        day = str(d.get('날짜') or '').strip()
+        rows.append({'품명': str(d['품명']).strip()[:60], '수량': qty, '금액': unit * qty,
+                     '부서': dept, '날짜': day if re.fullmatch(r'\d{4}-\d{2}-\d{2}', day) else ''})
+    return rows
+
+
+def rows_to_table(rows: list[dict]) -> str:
+    """구매표 행 → `입고등록`에 그대로 다시 붙여넣을 수 있는 | 표."""
+    lines = ['품명 | 수량 | 금액 | 부서 | 날짜']
+    for r in rows:
+        lines.append(f"{r['품명']} | {r['수량']} | {r['금액']:,} | {r.get('부서') or ''} | {r.get('날짜') or ''}")
+    return '\n'.join(lines)
