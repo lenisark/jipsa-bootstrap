@@ -247,7 +247,27 @@ SB
   # 3) [text](url) → <url|text>
   # 4) ~~strike~~ → ~strike~
   _md() {
+    # 표 → 목록(슬랙엔 표가 없음): `• *첫 칸* — 머리글: 값 · 머리글: 값`. 2번째 줄이 |---| 인 블록만 표로 본다.
     printf '%s' "$1" \
+      | awk '
+          function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+          function row(s) { s = trim(s); sub(/^\|/, "", s); sub(/\|$/, "", s); return s }
+          function flush(   i, j, nh, nc, line, sep, v) {
+            if (nr >= 2 && rows[2] ~ /^[ \t|:-]+$/ && rows[2] ~ /-/) {
+              nh = split(row(rows[1]), H, "|")
+              for (i = 3; i <= nr; i++) {
+                nc = split(row(rows[i]), C, "|"); line = "• *" trim(C[1]) "*"; sep = " — "
+                for (j = 2; j <= nc; j++) { v = trim(C[j]); if (v == "") continue
+                  line = line sep (trim(H[j]) != "" ? trim(H[j]) ": " : "") v; sep = " · " }
+                print line
+              }
+            } else for (i = 1; i <= nr; i++) print rows[i]
+            nr = 0
+          }
+          { t = trim($0) }
+          length(t) > 1 && t ~ /^\|.*\|$/ { rows[++nr] = $0; next }
+          { flush(); print }
+          END { flush() }' \
       | sed -E 's/\*\*([^*]+)\*\*/*\1*/g' \
       | sed -E 's/^[[:space:]]*#{1,6}[[:space:]]+(.+)$/*\1*/' \
       | sed -E 's/\[([^][]+)\]\(([^)[:space:]]+)\)/<\2|\1>/g' \
