@@ -26,7 +26,8 @@ description: 운영자에게 "개인 집사 + 부서 공용 집사" 멀티채널
 - `templates/lib/slack_mrkdwn.py` → `~/.claude/scripts/lib/slack_mrkdwn.py`
 - `templates/lib/md_to_notion.py` → `~/.claude/hooks/md_to_notion.py`
 - `templates/hooks/append_turn_raw.py` → `~/.claude/hooks/append_turn_raw.py`
-- `templates/hooks/slack-session-summary.sh` → `~/.claude/hooks/slack-session-summary.sh`
+- `templates/hooks/slack-session-summary.sh` → `~/.claude/hooks/slack-session-summary.sh` **(macOS/Linux)**
+- `templates/hooks/slack-session-summary.py` → `~/.claude/hooks/slack-session-summary.py` **(Windows — .sh 대신)**
 - `templates/scripts/slack-jipsa/daemon.py` → `~/.claude/scripts/slack-jipsa/daemon.py` **(멀티채널)**
 - `templates/scripts/slack-jipsa/reminders.py` → `~/.claude/scripts/slack-jipsa/reminders.py` **(알리미)**
 - `templates/scripts/slack-jipsa/tasks.py` → `~/.claude/scripts/slack-jipsa/tasks.py` **(작업 객체, 모듈 8)**

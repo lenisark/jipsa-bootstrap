@@ -111,7 +111,7 @@ jipsa-bootstrap/
 │   └── 11-supply-inventory.md   ← 비품관리 재고 자동 차감 (2.0)
 └── templates/
     ├── lib/               ← 검증 라이브러리 (그대로 카피)
-    ├── hooks/             ← Stop hook
+    ├── hooks/             ← Stop hook (.sh = macOS/Linux, .py = Windows)
     ├── scripts/
     │   ├── slack-jipsa/   ← daemon.py + reminders.py + tasks.py + approval.py + pretooluse_gate.py + supply.py + supply_store.py + .claude/settings.json.tmpl + channels.json.example + supply.json.example + CLAUDE.md
     │   └── slack-team/    ← 부서 작업폴더 (CLAUDE.md + docs/FAQ)

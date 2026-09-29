@@ -262,8 +262,11 @@ webhook 안 만들었으면 슬랙엔 안 옴. 노션 적재 (모듈 4) 진행 �
 - 시크릿 권한: `icacls ... /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F"`
 - daemon 자동 시작: launchd 대신 Task Scheduler (`Register-ScheduledTask`, at logon trigger)
 - run.sh 대신 run.ps1 (env 로드 후 daemon.py 실행)
-- Stop hook command: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ~/.claude/hooks/slack-session-summary.ps1`
-- AI 책임: `slack-session-summary.sh` (bash) 를 PowerShell로 번역해서 `slack-session-summary.ps1` 생성. 핵심 로직: stdin JSON 받기 → transcript 추출 → curl 대신 `Invoke-RestMethod` 로 슬랙 + 노션 post
+- Stop hook: **`templates/hooks/slack-session-summary.py`를 그대로 카피**(운영 검증된 Windows용 파이썬 버전 — jq 불필요, .sh와 같은 잡음 거르기·후속 턴 스레드 묶기). 토큰·채널은 `~/.claude/secrets/slack-jipsa.env`에서 읽는다.
+  - `Copy-Item templates/hooks/slack-session-summary.py $env:USERPROFILE/.claude/hooks/`
+  - `settings.json`의 Stop hook command: `"<python.exe 절대경로>" "<홈>/.claude/hooks/slack-session-summary.py"` (예: `C:/Python314/python.exe "C:/Users/이름/.claude/hooks/slack-session-summary.py"`)
+  - 로그: OS 임시 폴더의 `slack-session-summary.log`(`HOOK_LOG`로 변경 가능)
+  - ⚠️ 노션 적재(모듈 4)는 파이썬 버전에 없다. 노션까지 필요하면 AI가 `.sh`의 Notion 부분을 파이썬으로 옮겨 추가한다.
 
 ## OS별 분기 — Linux
 
