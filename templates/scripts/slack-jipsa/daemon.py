@@ -1373,7 +1373,7 @@ def handle_help(channel: str) -> None:
         f"• `{p}6월 20일 14시에 워크숍 알려줘`  _(1회성)_\n"
         "• 사전알림 `… 3일 전에도` · 담당자호출 `… @이름 에게`\n"
         f"• `{p}알림 목록` · `{p}2번 알림 삭제` · `{p}2번 알림 16시로 바꿔줘`\n\n"
-        "*✅ 완료체크*  알림 메시지에 ✅ 누르기\n"
+        "*✅ 완료체크*  알림 메시지에 ✅ 또는 :승인: 누르기\n"
         f"*🗳️ 투표*  `{p}투표 점심: 김밥 / 국밥` → `{p}투표 집계`\n"
         "*📌 위키수집*  메시지에 📌 누르면 위키에 저장\n"
         f"*📝 요약*  `{p}오늘 대화 요약해줘`\n"
@@ -1875,7 +1875,8 @@ def on_event(client: SocketModeClient, req: SocketModeRequest) -> None:
         threading.Thread(target=handle_reaction, args=(event,), daemon=True).start()
 
 
-COMPLETE_REACTIONS = ('white_check_mark', 'heavy_check_mark', 'ballot_box_with_check')
+COMPLETE_REACTIONS = ('white_check_mark', 'heavy_check_mark', 'ballot_box_with_check',
+                      '승인')                           # :승인: = 워크스페이스 커스텀 이모지
 PIN_EMOJI = 'pushpin'                                  # 📌 = 위키에 저장
 WIKI_SAVED_FILE = Path.home() / '.claude/scripts/slack-jipsa/wiki_saved.json'
 
