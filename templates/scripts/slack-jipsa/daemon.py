@@ -579,7 +579,8 @@ def _open_tasks_text(channel: str) -> str:
 def _post_task_items(channel: str, thread_ts: str, items: list[dict]) -> None:
     """과제마다 스레드 답글 1개 — 그 답글에 ✅ 누르면 완료 처리."""
     for it in items:
-        who = f" · 담당 {it['owner']}" if it.get('owner') else ''
+        o = (it.get('owner') or '').strip()
+        who = f" · 담당 {o if o.endswith('님') else o + '님'}" if o else ''
         due = f" · 기한 {it['due']}" if it.get('due') else ''
         try:
             r = web.chat_postMessage(channel=channel, thread_ts=thread_ts,
@@ -623,7 +624,8 @@ def run_daily_summary(channel: str, prompt: str = '') -> str | None:
     if convo:
         todo_rule = (
             "\n\n요약 뒤에 아래 형식의 블록을 반드시 붙이세요(해당 없으면 []). 이 블록은 사람에게 보이지 않습니다.\n"
-            f'{tsk.TODO_OPEN}\n[{{"title": "할 일(누가 무엇을)", "owner": "담당자 이름", "due": "YYYY-MM-DD 또는 빈칸"}}]\n{tsk.TODO_CLOSE}\n'
+            f'{tsk.TODO_OPEN}\n[{{"title": "할 일(누가 무엇을)", "owner": "담당자 이름(님·직함 없이)", "due": "YYYY-MM-DD 또는 빈칸"}}]\n{tsk.TODO_CLOSE}\n'
+            "owner 는 대화 기록에 나온 사람 이름으로 적고(예: 이재정), '상무님'처럼 직함만 쓰지 마세요. 누군지 모르면 빈칸. "
             "기준: 요청·지시·약속 중 기간 안에 끝났다는 말이 없는 것만. 잡담·단순 공유·이미 끝난 일은 제외. "
             "아래 '이미 등록된 미결 과제'와 같은 일은 넣지 마세요. 최대 5개.\n"
             f"[이미 등록된 미결 과제]\n{_open_tasks_text(channel)}") if want_todo else ''
@@ -631,7 +633,8 @@ def run_daily_summary(channel: str, prompt: str = '') -> str | None:
             f"다음은 이 슬랙 채널의 {period} 대화 기록입니다(시각은 KST). "
             "이 기록만 근거로 요약하세요. 기록에 없는 내용은 지어내지 마세요.\n"
             f"첫 줄은 `*{period} 채널 요약*` 으로 쓰세요(날짜·요일을 바꾸지 마세요). "
-            "주제별로 묶고, 파일 저장 여부 같은 작업 방식 언급은 쓰지 마세요.\n\n"
+            "주제별로 묶고, 파일 저장 여부 같은 작업 방식 언급은 쓰지 마세요. "
+            "사람은 이름 뒤에 '님'만 붙여 부르세요(예: 이재정님이 요청). '팀원'·직급을 붙이거나 짐작하지 마세요.\n\n"
             f"[대화 기록]\n{convo}\n\n[요청]\n{prompt}{todo_rule}")
         try:
             r = _run_claude(effective, str(uuid.uuid4()), True, 600,
