@@ -531,9 +531,9 @@ def parse_intent(text: str) -> dict:
     action = _detect_action(text)
     today = datetime.now(KST).date()
     if action == 'add':
+        # 시간이 안 적혀 있으면 hour=None → _handle_add 가 등록하지 않고 시간을 되묻는다.
+        # (예전엔 9시로 채워, '평일'·'요약' 같은 말이 든 일반 문장이 평일 9시 작업으로 등록됐음)
         hour, minute = _parse_time(text)
-        if hour is None:
-            hour, minute = 9, 0
         base = {'hour': hour, 'minute': minute,
                 'message': _extract_message(text) or None,
                 'mentions': _MENTION.findall(text)}
@@ -692,9 +692,16 @@ def _handle_add(web, channel, user, intent) -> None:
     mentions = intent.get('mentions') or []
     today = datetime.now(KST).date()
 
+    if hour is None:
+        web.chat_postMessage(channel=channel, mrkdwn=True, text=(
+            "⏰ 알림으로 등록하려면 *시간*이 필요해요. 등록하지 않았어요.\n"
+            f"알림이 맞다면 시간을 넣어 다시 보내주세요. 예) `평일 9시에 {(msg or '할 일')[:20]} 알려줘`\n"
+            "_알림이 아니었다면 이 메시지는 무시하셔도 돼요._"))
+        return
+
     # 주기별 유효성 검사
     err = None
-    if hour is None or not (0 <= int(hour) <= 23) or not msg:
+    if not (0 <= int(hour) <= 23) or not msg:
         err = True
     elif freq == 'monthly':
         d = intent.get('day')
