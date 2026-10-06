@@ -324,6 +324,9 @@ def _run_claude(prompt: str, session_id: str, is_new: bool, timeout: int,
         'claude', '--print',
         '--permission-mode', 'bypassPermissions',
         '--dangerously-skip-permissions',
+        # 사용자 설정 제외: 개발용 플러그인·계정 커넥터(Gmail·Drive 등)·Stop 훅이 봇에 안 붙게.
+        # 승인 게이트 PreToolUse 훅은 project 설정(.claude/settings.json)이라 그대로 동작.
+        '--setting-sources', 'project,local',
         '--output-format', 'text',
         '--model', model,
         '--append-system-prompt', sysprompt,
