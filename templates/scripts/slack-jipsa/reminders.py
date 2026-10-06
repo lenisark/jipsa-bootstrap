@@ -61,23 +61,113 @@ def _run_action(web, r: dict) -> None:
     """능동 작업 알림 발사: 에이전트 실행 → 결과를 채널에 보고. (lock 밖 비동기 호출)"""
     ch = r.get('channel')
     label = r.get('message') or '자동 작업'
+    out = _execute(ch, r.get('action') or '', r.get('id'))
     try:
-        out = _executor(ch, r.get('action') or '')
-    except Exception as e:
-        log(f'action exec err id={r.get("id")}: {e}')
-        out = None
-    try:
-        if out == '':
-            pass                          # 실행기가 직접 게시했거나 보고할 게 없음(빈 요약 등)
-        elif out:
-            # 지시문 echo 없이 결과(요약)만 게시. (결과 자체에 제목이 들어있음)
-            web.chat_postMessage(channel=ch, mrkdwn=True, text=out)
+        if out is None:
+            # 실패(대개 Claude 로그인 만료) → 30분마다 다시 시도. 알림은 처음 한 번만.
+            if schedule_retry(r):
+                web.chat_postMessage(channel=ch, mrkdwn=True, text=(
+                    f"🤖 자동 작업을 끝내지 못했어요: {label}\n"
+                    f"_{RETRY_EVERY // 60}분마다 다시 시도해요. Claude 로그인이 풀렸다면 다시 로그인만 해주세요._"))
         else:
-            web.chat_postMessage(channel=ch, mrkdwn=True,
-                                 text=f"🤖 자동 작업을 끝내지 못했어요: {label}")
+            _deliver(web, ch, out)
         log(f"action fired id={r.get('id')} ch={ch}")
     except Exception as e:
         log(f'action post fail id={r.get("id")}: {e}')
+
+
+def _execute(ch: str, action: str, rid) -> str | None:
+    try:
+        return _executor(ch, action)
+    except Exception as e:
+        log(f'action exec err id={rid}: {e}')
+        return None
+
+
+def _deliver(web, ch: str, out: str) -> None:
+    """'' = 실행기가 직접 게시했거나 보고할 게 없음(빈 요약 등). 그 외엔 결과만 게시(지시문 echo 없이)."""
+    if out:
+        web.chat_postMessage(channel=ch, mrkdwn=True, text=out)
+
+
+# ── 실패한 능동 작업 재시도 (파일에 저장 → 데몬 재시작에도 이어감) ─────
+RETRY_FILE = BASE / 'action_retry.json'
+RETRY_EVERY = 30 * 60          # 30분 간격
+RETRY_FOR = 12 * 3600          # 처음 실패 후 12시간까지
+_retry_lock = threading.Lock()
+
+
+def _load_retries() -> dict:
+    try:
+        return json.loads(RETRY_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_retries(d: dict) -> None:
+    try:
+        RETRY_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        log(f'retry save fail: {e}')
+
+
+def schedule_retry(r: dict, now: float | None = None) -> bool:
+    """실패한 작업을 재시도 목록에 올림. 새로 올렸으면 True(같은 날 같은 알림은 한 번만)."""
+    now = now or time.time()
+    key = f"{r.get('id')}@{datetime.fromtimestamp(now, KST).date().isoformat()}"
+    with _retry_lock:
+        d = _load_retries()
+        if key in d:
+            return False
+        d[key] = {'channel': r.get('channel'), 'action': r.get('action') or '',
+                  'label': r.get('message') or '자동 작업', 'next': now + RETRY_EVERY,
+                  'until': now + RETRY_FOR, 'tries': 0}
+        _save_retries(d)
+    return True
+
+
+def retry_tick(web, now: float | None = None, run_async: bool = True) -> None:
+    """reminder_loop 가 30초마다 호출. 때가 된 재시도를 실행(성공하면 목록에서 뺌)."""
+    now = now or time.time()
+    due = []
+    with _retry_lock:
+        d = _load_retries()
+        for key, v in list(d.items()):
+            if now > v['until']:
+                d.pop(key)
+                log(f'retry give up {key}')
+                try:
+                    web.chat_postMessage(channel=v['channel'], mrkdwn=True,
+                                         text=f"🤖 다시 시도를 멈췄어요: {v['label']} (12시간 동안 실패)")
+                except Exception:
+                    pass
+            elif now >= v['next']:
+                v['next'] = now + RETRY_EVERY       # 실행 중 중복 시도 방지
+                v['tries'] += 1
+                due.append((key, dict(v)))
+        _save_retries(d)
+    for key, v in due:
+        if run_async:
+            threading.Thread(target=_retry_once, args=(web, key, v), daemon=True).start()
+        else:
+            _retry_once(web, key, v)
+
+
+def _retry_once(web, key: str, v: dict) -> None:
+    out = _execute(v['channel'], v['action'], key)
+    if out is None:
+        log(f'retry fail {key} tries={v["tries"]}')
+        return
+    try:
+        _deliver(web, v['channel'], out)
+    except Exception as e:
+        log(f'retry post fail {key}: {e}')
+        return
+    with _retry_lock:
+        d = _load_retries()
+        d.pop(key, None)
+        _save_retries(d)
+    log(f'retry ok {key} tries={v["tries"]}')
 
 
 # ── 공휴일 / 영업일 판정 ────────────────────────────────────────────
@@ -947,6 +1037,7 @@ def reminder_loop(web) -> None:
     while True:
         try:
             check_and_fire(web)
+            retry_tick(web)
         except Exception as e:
             log(f'reminder loop err: {e}')
         time.sleep(30)
