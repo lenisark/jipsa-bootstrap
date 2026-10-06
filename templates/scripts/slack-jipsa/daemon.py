@@ -356,8 +356,9 @@ def _warn_auth_expiry() -> None:
     _auth_warned_at = time.time()
     try:
         web.chat_postMessage(channel=CHANNEL, text=(
-            '⚠️ 집사가 Claude 호출에 계속 실패하고 있어요(로그인 만료 의심). '
-            '터미널에서 `claude` 실행 후 `/login` 해주세요. 데몬 재시작은 필요 없어요.'))
+            '⚠️ 집사가 Claude 호출에 실패했어요(로그인 만료 의심). '
+            '터미널에서 `claude` 실행 후 `/login` 해주세요. 데몬 재시작은 필요 없어요.\n'
+            '_실패한 자동 작업은 로그인 후 30분 안에 다시 시도돼요._'))
     except Exception as e:
         log(f'  auth warn post fail: {e}')
 
@@ -2170,6 +2171,46 @@ def _purchase_monthly_loop(web) -> None:
         time.sleep(1800)     # 30분마다 조건 점검
 
 
+AUTH_CHECK_AT = (8, 30)          # 매 영업일 이 시각 이후 1회(정오 전까지) 로그인 확인
+
+
+def claude_ping() -> tuple[bool, str]:
+    """아주 짧은 claude 호출로 로그인 상태 확인. (정상 여부, 실패 사유)
+    로그인 만료(rc≠0·stderr 비어 있음)면 _run_claude 가 기존 경고를 개인 채널에 올린다."""
+    notools = ['Bash', 'Write', 'Edit', 'NotebookEdit', 'Read', 'Grep', 'Glob',
+               'WebFetch', 'WebSearch', 'Task']
+    try:
+        r = _run_claude('ok 라고만 답하세요.', str(uuid.uuid4()), True, 90, 'haiku',
+                        None, [], notools)
+    except subprocess.TimeoutExpired:
+        return False, '응답 시간 초과(90초)'
+    except Exception as e:
+        return False, str(e)[:200]
+    if r.returncode == 0 and (r.stdout or '').strip():
+        return True, ''
+    return False, (r.stderr or '').strip()[-200:]
+
+
+def _auth_check_loop() -> None:
+    last = ''
+    while True:
+        try:
+            now = datetime.now(_KST)
+            day = now.date()
+            if (last != day.isoformat() and AUTH_CHECK_AT <= (now.hour, now.minute) and now.hour < 12
+                    and not (rmd and rmd.is_non_working(day))):
+                last = day.isoformat()
+                ok, why = claude_ping()
+                log(f'아침 로그인 확인: {"정상" if ok else "실패 " + (why or "(stderr 없음 → 로그인 만료 의심)")}')
+                if not ok and why:      # 로그인 만료 외 실패(네트워크 등)는 사유와 함께 따로 알림
+                    web.chat_postMessage(channel=CHANNEL, text=(
+                        f'⚠️ 아침 점검: 집사가 Claude 호출에 실패했어요 — {why}\n'
+                        '9시 자동 작업이 실패하면 30분마다 다시 시도합니다.'))
+        except Exception as e:
+            log(f'  auth check err: {e}')
+        time.sleep(60)
+
+
 def main() -> None:
     log(f'=== {BOT_NAME} daemon 시작 (channel={CHANNEL[:6]}.., bot={BOT}) ===')
     sock.socket_mode_request_listeners.append(on_event)
@@ -2185,6 +2226,8 @@ def main() -> None:
         log('reminders 모듈 로드 실패 — 알리미 비활성')
     # 승인 게이트 만료 sweeper (jipsa 2.0)
     threading.Thread(target=_gate_sweeper, daemon=True).start()
+    # 매 영업일 아침 Claude 로그인 확인 (9시 자동 작업 전에 만료를 알림)
+    threading.Thread(target=_auth_check_loop, daemon=True).start()
     # 비품관리: 구매기록 모드면 재고 폴링/차감 비활성, 아니면 기존 폴링 시작
     _pcfg = _load_purchase_cfg()
     if _pcfg and _pcfg.get('mode') == 'purchase':
